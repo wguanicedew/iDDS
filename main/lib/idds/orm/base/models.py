@@ -140,8 +140,43 @@ class Request(BASE, ModelBase):
     accessed_at = Column("accessed_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     expired_at = Column("expired_at", DateTime)
     errors = Column(JSON())
-    request_metadata = Column(JSON())
-    processing_metadata = Column(JSON())
+    _request_metadata = Column('request_metadata', JSON())
+    _processing_metadata = Column('processing_metadata', JSON())
+
+    @property
+    def request_metadata(self):
+        if self._request_metadata and 'workflow' in self._request_metadata:
+            workflow = self._request_metadata['workflow']
+            workflow_data = None
+            if self._processing_metadata and 'workflow_data' in self._processing_metadata:
+                workflow_data = self._processing_metadata['workflow_data']
+            if workflow is not None and workflow_data is not None:
+                workflow.load_running_data(workflow_data)
+                self._request_metadata['workflow'] = workflow
+        return self._request_metadata
+
+    @request_metadata.setter
+    def request_metadata(self, request_metadata):
+        if self._request_metadata is None:
+            self._request_metadata = request_metadata
+        if self._processing_metadata is None:
+            self._processing_metadata = {}
+        if request_metadata and 'workflow' in request_metadata:
+            workflow = request_metadata['workflow']
+            self._processing_metadata['workflow_data'] = workflow.get_running_data()
+            
+    @property
+    def processing_metadata(self):
+        return self._processing_metadata
+
+    @processing_metadata.setter
+    def processing_metadata(self, processing_metadata):
+        if self._processing_metadata is None:
+            self._processing_metadata = {}
+        if processing_metadata:
+            for k in processing_metadata:
+                if k != 'workflow_data':
+                    self._processing_metadata[key] = processing_metadata[k]
 
     _table_args = (PrimaryKeyConstraint('request_id', name='REQUESTS_PK'),
                    CheckConstraint('status IS NOT NULL', name='REQUESTS_STATUS_ID_NN'),
@@ -204,6 +239,7 @@ class Transform(BASE, ModelBase):
     finished_at = Column("finished_at", DateTime)
     expired_at = Column("expired_at", DateTime)
     transform_metadata = Column(JSON())
+    running_metadata = Column(JSON())
 
     _table_args = (PrimaryKeyConstraint('transform_id', name='TRANSFORMS_PK'),
                    CheckConstraint('status IS NOT NULL', name='TRANSFORMS_STATUS_ID_NN'),
@@ -243,6 +279,7 @@ class Processing(BASE, ModelBase):
     finished_at = Column("finished_at", DateTime)
     expired_at = Column("expired_at", DateTime)
     processing_metadata = Column(JSON())
+    running_metadata = Column(JSON())
     output_metadata = Column(JSON())
 
     _table_args = (PrimaryKeyConstraint('processing_id', name='PROCESSINGS_PK'),

@@ -370,7 +370,7 @@ class ATLASPandaWork(Work):
         else:
             return self.create_processing(input_output_maps)
 
-    def create_processing(self, input_output_maps):
+    def create_processing(self, input_output_maps=[]):
         """
         *** Function called by Transformer agent.
 

@@ -147,6 +147,16 @@ class Work(Base):
 
         self.backup_to_release_inputs = {'0': [], '1': [], '2': []}
 
+        self.running_data_names = []
+        for name in ['internal_id', 'template_work_id', 'initialized', 'sequence_id', 'parameters', 'work_id', 'transforming', 'workdir',
+                     # 'collections', 'primary_input_collection', 'other_input_collections', 'output_collections', 'log_collections',
+                     'collections',
+                     '_has_new_inputs', 'status', 'substatus', 'polling_retries', 'errors', 'next_works',
+                     'processings', 'active_processings', 'cancelled_processings', 'suspended_processings', 'old_processings',
+                     'terminated_msg', 'output_data', 'parameters_for_next_task', 'status_statistics',
+                     'tocancel', 'tosuspend', 'toresume']:
+            self.running_data_names.append(name)
+
     def get_class_name(self):
         return self.__class__.__name__
 
@@ -825,7 +835,7 @@ class Work(Base):
             return True
         return False
 
-    def create_processing(self, input_output_maps):
+    def create_processing(self, input_output_maps=[]):
         """
         *** Function called by Transformer agent.
         """
@@ -841,7 +851,8 @@ class Work(Base):
         if self.active_processings:
             return self.processings[self.active_processings[0]]
         else:
-            return None
+            # return None
+            return self.create_processing(input_output_maps)
             # self.process = process
             # return process
 
@@ -976,3 +987,65 @@ class Work(Base):
             os.environ['X509_USER_PROXY'] = self.original_proxy
         else:
             del os.environ['X509_USER_PROXY']
+
+    def get_running_data_names(self):
+        return self.running_data_names
+
+    def add_running_data(self, data_name):
+        self.running_data_names.append(data_name)
+
+    def get_running_processing_data(self, processing):
+        proc = {}
+        for key in processing:
+            proc[key] = processing[key]
+        return proc
+
+    def load_running_processing_data(self, processing, processing_data):
+        for key in processing_data:
+            if key in processing:
+                if isinstance(processing[key], dict):
+                    for k in processing_data[key]:
+                        processing[key][k] = processing_data[key][k]
+                # elif isinstance(processing[key], list):
+                else:
+                    processing[key] = processing_data[key]
+            else:
+                processing[key] = processing_data[key]
+        return processing
+
+    def get_running_data(self):
+        ret = {}
+        for name in self.get_running_data_names():
+            if name == 'collections':
+                colls = {}
+                for coll_inter_id in self.collections:
+                    if 'coll_id' in self.collections[coll_inter_id]:
+                        colls[coll_inter_id] = {'coll_id': self.collections[coll_inter_id]['coll_id']}
+                ret[name] = colls
+            elif name == 'processings':
+                procs = {}
+                for proc_inter_id in self.processings:
+                    procs[proc_inter_id] = self.get_running_processing_data(self.processings[proc_inter_id])
+                ret[name] = procs
+            else:
+                ret[name] = getattr(self, name)
+        return ret
+
+    def load_running_data(self, data):
+        for name in self.get_running_data_names():
+            if name in data:
+                value = data[name]
+
+                if name == 'collections':
+                    colls = value
+                    for coll_inter_id in colls:
+                        self.collections[coll_inter_id]['coll_id'] = colls[coll_inter_id]['coll_id']
+                elif name == 'processings':
+                    procs = value
+                    for proc_inter_id in procs:
+                        if proc_inter_id not in self.processings:
+                            self.processings[proc_inter_id] = self.load_running_processing_data(self.processings.get(proc_inter_id, {}),
+                                                                                                procs[proc_inter_id])
+                else:
+                    setattr(self, name, value)
+

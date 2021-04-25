@@ -136,6 +136,15 @@ class Workflow(Base):
 
         self.proxy = None
 
+        self.running_data_names = []
+        for name in ['internal_id', 'template_work_id', 'workload_id', 'work_sequence', 'terminated_works', 'initial_works',
+                     'primary_initial_work', 'independent_works', 'first_initial', 'new_to_run_works', 'current_running_works',
+                     'num_subfinished_works', 'num_finished_works', 'num_failed_works', 'num_cancelled_works', 'num_suspended_works',
+                     'num_expired_works', 'num_total_works', 'last_work']:
+            self.running_data_names.append(name)
+        for name in ['works']:
+            self.running_data_names.append(name)
+
     def get_name(self):
         return self.name
 
@@ -456,3 +465,37 @@ class Workflow(Base):
 
     def get_proxy(self):
         return self.proxy
+
+    def get_running_data_names(self):
+        return self.running_data_names
+
+    def add_running_data(self, data_name):
+        self.running_data_names.append(data_name)
+
+    def get_running_data(self):
+        ret = {}
+        for name in self.get_running_data_names():
+            if name == 'works':
+                works = {}
+                for work_id in self.works:
+                    works[work_id] = self.works[work_id].get_running_data()
+                ret[name] = works
+            else:
+                ret[name] = getattr(self, name)
+        return ret
+
+    def load_running_data(self, data):
+        for name in self.get_running_data_names():
+            if name in data:
+                value = data[name]
+
+                if name == 'works':
+                    works = value
+                    for work_id in works:
+                        template_id = works[work_id]['template_id']
+                        work_template = self.works_template[template_id]
+                        new_work = work_template.generate_work_from_template()
+                        new_work.load_running_data(works[work_id])
+                        self.works[new_work.get_internal_id()] = new_work
+                else:
+                    setattr(self, name, value)

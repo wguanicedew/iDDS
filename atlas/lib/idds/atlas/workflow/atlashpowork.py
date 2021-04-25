@@ -144,6 +144,10 @@ class ATLASHPOWork(ATLASCondorWork):
     def poll_external_collection(self, coll):
         try:
             if 'status' in coll and coll['status'] in [CollectionStatus.Closed]:
+                if not self.terminated:
+                    self.logger.info("Work is not terminated, reopen collection")
+                    coll['coll_metadata']['is_open'] = True
+                    coll['status'] = CollectionStatus.Open
                 return coll
             else:
                 if 'coll_metadata' not in coll:
@@ -336,6 +340,8 @@ class ATLASHPOWork(ATLASCondorWork):
             self.reap_processing(active_processing)
             output_metadata = active_processing['output_metadata']
             if output_metadata:
+                if self.max_points and self.max_points > self.finished_points:
+                    self.terminated = False
                 return output_metadata
             else:
                 self.terminated = True
@@ -353,7 +359,7 @@ class ATLASHPOWork(ATLASCondorWork):
         else:
             return self.create_processing(input_output_maps)
 
-    def create_processing(self, input_output_maps):
+    def create_processing(self, input_output_maps=[]):
         proc = {'processing_metadata': {'internal_id': str(uuid.uuid1()),
                                         'points_to_generate': self.points_to_generate}}
         self.add_processing_to_processings(proc)

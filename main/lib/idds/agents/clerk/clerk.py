@@ -91,6 +91,7 @@ class Clerk(BaseAgent):
             for work in works:
                 new_work = work.copy()
                 new_work.add_proxy(wf.get_proxy())
+                new_work.create_processing()
                 transform = {'request_id': req['request_id'],
                              'workload_id': req['workload_id'],
                              'transform_type': work.get_work_type(),
@@ -105,13 +106,14 @@ class Clerk(BaseAgent):
                                                     'work_name': new_work.get_work_name(),
                                                     'work': new_work,
                                                     'original_work': work}
+                             'running_metadata': {'work_data': new_work.get_running_data()}
                              # 'collections': related_collections
                              }
                 transforms.append(transform)
             self.logger.info("Processing request(%s): new transforms: %s" % (req['request_id'],
                                                                              str(transforms)))
             processing_metadata = req['processing_metadata']
-            processing_metadata = {'workflow': wf}
+            processing_metadata = {'workflow_data': wf.get_running_data()}
 
             ret_req = {'request_id': req['request_id'],
                        'parameters': {'status': RequestStatus.Transforming,
@@ -209,7 +211,16 @@ class Clerk(BaseAgent):
         """
         self.logger.info("process_running_request: request_id: %s" % req['request_id'])
         processing_metadata = req['processing_metadata']
-        wf = processing_metadata['workflow']
+        if 'workflow_data' in processing_metadata:
+            # for new version
+            wf_data = processing_metadata['workflow_data']
+            workflow = req['request_metadata']['workflow']
+            wf = workflow.copy()
+            wf.load_running_data(wf_data)
+        else:
+            # for old version
+            wf = processing_metadata['workflow']
+            del processing_metadata['workflow']
 
         new_transforms = []
         if req['status'] in [RequestStatus.Transforming]:
@@ -230,7 +241,9 @@ class Clerk(BaseAgent):
                                                         'template_work_id': new_work.get_template_work_id(),
                                                         'sequence_id': new_work.get_sequence_id(),
                                                         'work_name': new_work.get_work_name(),
-                                                        'work': new_work}
+                                                        'work': new_work,
+                                                        'original_work': work}
+                                 'running_metadata': {'work_data': new_work.get_running_data()}
                                  # 'collections': related_collections
                                  }
                 new_transforms.append(new_transform)
@@ -271,6 +284,8 @@ class Clerk(BaseAgent):
             else:
                 req_status = RequestStatus.Transforming
             req_msg = None
+
+        processing_metadata['workflow_data'] = wf.get_running_data()
 
         parameters = {'status': req_status,
                       'locking': RequestLocking.Idle,
@@ -313,7 +328,17 @@ class Clerk(BaseAgent):
         processing_metadata = req['processing_metadata']
 
         if req['substatus'] == RequestStatus.ToResume:
-            wf = processing_metadata['workflow']
+            if 'workflow_data' in processing_metadata:
+                # for new version
+                wf_data = processing_metadata['workflow_data']
+                workflow = req['request_metadata']['workflow']
+                wf = workflow.copy()
+                wf.load_running_data(wf_data)
+            else:
+                # for old version
+                wf = processing_metadata['workflow']
+                del processing_metadata['workflow']
+
             wf.resume_works()
 
         if 'operations' not in processing_metadata:
@@ -328,6 +353,8 @@ class Clerk(BaseAgent):
             #                         RequestStatus.Cancelled, RequestStatus.Suspending,
             #                         RequestStatus.Suspended]:
             tfs_status[tf['transform_id']] = {'substatus': tf_status}
+
+        processing_metadata['workflow_data'] = wf.get_running_data()
 
         ret_req = {'request_id': req['request_id'],
                    'parameters': {'status': req_status,

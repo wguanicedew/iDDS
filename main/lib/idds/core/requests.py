@@ -24,7 +24,7 @@ from idds.orm import workprogress as orm_workprogresses
 
 def create_request(scope=None, name=None, requester=None, request_type=None, transform_tag=None,
                    status=RequestStatus.New, locking=RequestLocking.Idle, priority=0,
-                   lifetime=30, workload_id=None, request_metadata=None,
+                   lifetime=30, workload_id=None, workflow=None, request_metadata=None,
                    processing_metadata=None):
     """
     Add a request.
@@ -51,6 +51,7 @@ def create_request(scope=None, name=None, requester=None, request_type=None, tra
     kwargs = {'scope': scope, 'name': name, 'requester': requester, 'request_type': request_type,
               'transform_tag': transform_tag, 'status': status, 'locking': locking,
               'priority': priority, 'lifetime': lifetime, 'workload_id': workload_id,
+              'workflow': workflow,
               'request_metadata': request_metadata, 'processing_metadata': processing_metadata}
     return orm_requests.create_request(**kwargs)
 
@@ -58,7 +59,7 @@ def create_request(scope=None, name=None, requester=None, request_type=None, tra
 @transactional_session
 def add_request(scope=None, name=None, requester=None, request_type=None, transform_tag=None,
                 status=RequestStatus.New, locking=RequestLocking.Idle, priority=0,
-                lifetime=30, workload_id=None, request_metadata=None,
+                lifetime=30, workload_id=None, workflow=None, request_metadata=None,
                 processing_metadata=None, session=None):
     """
     Add a request.
@@ -85,6 +86,7 @@ def add_request(scope=None, name=None, requester=None, request_type=None, transf
     kwargs = {'scope': scope, 'name': name, 'requester': requester, 'request_type': request_type,
               'transform_tag': transform_tag, 'status': status, 'locking': locking,
               'priority': priority, 'lifetime': lifetime, 'workload_id': workload_id,
+              'workflow': workflow,
               'request_metadata': request_metadata, 'processing_metadata': processing_metadata,
               'session': session}
     return orm_requests.add_request(**kwargs)

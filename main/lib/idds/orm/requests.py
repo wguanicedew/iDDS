@@ -27,9 +27,31 @@ from idds.orm.base.session import read_session, transactional_session
 from idds.orm.base import models
 
 
+def store_workflow_to_metadata(workflow=None, request_metadata=None, processing_metadata=None):
+    if workflow is not None:
+        if request_metadata is None:
+            request_metadata = {}
+        request_metadata['workflow'] = workflow
+        if processing_metadata is None:
+            processing_metadata = {}
+        processing_metadata['workflow_data'] = workflow.get_running_data()
+    return request_metadata, processing_metadata
+
+
+def load_workflow_from_metadata(request_metadata=None, processing_metadata=None):
+    if request_metadata and 'workflow' in request_metadata:
+        workflow = request_metadata['workflow']
+        if processing_metadata and 'workflow_data' in processing_metadata:
+            workflow_data = processing_metadata['workflow_data']
+        if workflow is not None and workflow_data is not None:
+            workflow.load_running_data(workflow_data)
+            request_metadata['workflow'] = workflow
+    return request_metadata, processing_metadata
+
+
 def create_request(scope=None, name=None, requester=None, request_type=None, transform_tag=None,
                    status=RequestStatus.New, locking=RequestLocking.Idle, priority=0,
-                   lifetime=30, workload_id=None, request_metadata=None,
+                   lifetime=30, workload_id=None, workflow=None, request_metadata=None,
                    processing_metadata=None):
     """
     Create a request.
@@ -68,6 +90,8 @@ def create_request(scope=None, name=None, requester=None, request_type=None, tra
             request_metadata = {}
         request_metadata['is_pseudo_input'] = True
 
+    request_metadata, processing_metadata = store_workflow_to_metadata(workflow, request_metadata, processing_metadata)
+
     new_request = models.Request(scope=scope, name=name, requester=requester, request_type=request_type,
                                  transform_tag=transform_tag, status=status, locking=locking,
                                  priority=priority, workload_id=workload_id,
@@ -79,7 +103,7 @@ def create_request(scope=None, name=None, requester=None, request_type=None, tra
 @transactional_session
 def add_request(scope=None, name=None, requester=None, request_type=None, transform_tag=None,
                 status=RequestStatus.New, locking=RequestLocking.Idle, priority=0,
-                lifetime=30, workload_id=None, request_metadata=None,
+                lifetime=30, workload_id=None, workflow=None, request_metadata=None,
                 processing_metadata=None, session=None):
     """
     Add a request.
@@ -107,6 +131,7 @@ def add_request(scope=None, name=None, requester=None, request_type=None, transf
         new_request = create_request(scope=scope, name=name, requester=requester, request_type=request_type,
                                      transform_tag=transform_tag, status=status, locking=locking,
                                      priority=priority, workload_id=workload_id, lifetime=lifetime,
+                                     workflow=workflow,
                                      request_metadata=request_metadata, processing_metadata=processing_metadata)
         new_request.save(session=session)
         request_id = new_request.request_id
@@ -188,6 +213,9 @@ def get_request(request_id, to_json=False, session=None):
         if not ret:
             return None
         else:
+             request_metadata, processing_metadata = load_workflow_from_metadata(request_metadata, processing_metadata)
+             'workflow': workflow,
+
             if to_json:
                 return ret.to_dict_json()
             else:

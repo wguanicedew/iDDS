@@ -309,7 +309,7 @@ class DomaPanDAWork(Work):
         """
         return True
 
-    def get_processing(self, input_output_maps):
+    def get_processing(self, input_output_maps=[]):
         """
         *** Function called by Transformer agent.
 
@@ -322,7 +322,7 @@ class DomaPanDAWork(Work):
             # return None
             return self.create_processing(input_output_maps)
 
-    def create_processing(self, input_output_maps):
+    def create_processing(self, input_output_maps=[]):
         """
         *** Function called by Transformer agent.
 
@@ -380,6 +380,18 @@ class DomaPanDAWork(Work):
                                         'task_param': task_param_map}}
         self.add_processing_to_processings(proc)
         self.active_processings.append(proc['processing_metadata']['internal_id'])
+        return proc
+
+    def get_running_processing_data(self, processing):
+        proc = {}
+        for key in processing:
+            if key == 'processing_metadata':
+                proc[key] = {}
+                for k in processing[key]:
+                    if key != 'task_param':
+                        proc[key][k] = processing[key][k]
+            else:
+                proc[key] = processing[key]
         return proc
 
     def submit_panda_task(self, processing):
