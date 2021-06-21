@@ -6,8 +6,9 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2020
 
+import datetime
 import traceback
 try:
     # python 3
@@ -16,11 +17,10 @@ except ImportError:
     # Python 2
     from Queue import Queue
 
-from idds.common.constants import (Sections, TransformType, ProcessingStatus, ProcessingLocking,
-                                   MessageType, MessageStatus, MessageSource)
-from idds.common.exceptions import (AgentPluginError)
+from idds.common import exceptions
+from idds.common.constants import (Sections, ProcessingStatus, ProcessingLocking)
 from idds.common.utils import setup_logging
-from idds.core import (catalog as core_catalog, transforms as core_transforms,
+from idds.core import (transforms as core_transforms,
                        processings as core_processings)
 from idds.agents.common.baseagent import BaseAgent
 
@@ -29,10 +29,10 @@ setup_logging(__name__)
 
 class Carrier(BaseAgent):
     """
-    Carrier works to submit and monitor tasks to WFMS.
+    Carrier works to submit and running tasks to WFMS.
     """
 
-    def __init__(self, num_threads=1, poll_time_period=1800, retrieve_bulk_size=None,
+    def __init__(self, num_threads=1, poll_time_period=10, retrieve_bulk_size=None,
                  message_bulk_size=1000, **kwargs):
         super(Carrier, self).__init__(num_threads=num_threads, **kwargs)
         self.config_section = Sections.Carrier
@@ -42,49 +42,79 @@ class Carrier(BaseAgent):
 
         self.new_task_queue = Queue()
         self.new_output_queue = Queue()
-        self.monitor_task_queue = Queue()
-        self.monitor_output_queue = Queue()
+        self.running_task_queue = Queue()
+        self.running_output_queue = Queue()
+        self.new_processing_size = 0
+        self.running_processing_size = 0
+
+    def show_queue_size(self):
+        q_str = "new queue size: %s, processing size: %s, output queue size: %s, " % (self.new_task_queue.qsize(),
+                                                                                      self.new_processing_size,
+                                                                                      self.new_output_queue.qsize())
+        q_str += "running queue size: %s, processing size: %s,  output queue size: %s" % (self.running_task_queue.qsize(),
+                                                                                          self.running_processing_size,
+                                                                                          self.running_output_queue.qsize())
+        self.logger.debug(q_str)
+
+    def init(self):
+        status = [ProcessingStatus.New, ProcessingStatus.Submitting, ProcessingStatus.Submitted,
+                  ProcessingStatus.Running, ProcessingStatus.FinishedOnExec]
+        core_processings.clean_next_poll_at(status)
 
     def get_new_processings(self):
         """
         Get new processing
         """
-        processing_status = [ProcessingStatus.New]
-        processings = core_processings.get_processings_by_status(status=processing_status, time_period=120, locking=True, bulk_size=self.retrieve_bulk_size)
-        self.logger.info("Main thread get %s [new] processings to process" % len(processings))
-        return processings
+        try:
+            if self.new_task_queue.qsize() > 0 or self.new_output_queue.qsize() > 0:
+                return []
 
-    def submit_processing(self, processing, transform, input_collection, output_collection):
-        if transform['transform_type'] == TransformType.StageIn:
-            if 'stagein_submitter' not in self.plugins:
-                raise AgentPluginError('Plugin stagein_submitter is required')
-            return self.plugins['stagein_submitter'](processing, transform, input_collection, output_collection)
-        if transform['transform_type'] == TransformType.ActiveLearning:
-            if 'activelearning_submitter' not in self.plugins:
-                raise AgentPluginError('Plugin activelearning_submitter is required')
-            return self.plugins['activelearning_submitter'](processing, transform, input_collection, output_collection)
-        if transform['transform_type'] == TransformType.HyperParameterOpt:
-            if 'hyperparameteropt_submitter' not in self.plugins:
-                raise AgentPluginError('Plugin hyperparameteropt_submitter is required')
-            return self.plugins['hyperparameteropt_submitter'](processing, transform, input_collection, output_collection)
+            self.show_queue_size()
 
-        return None
+            processing_status = [ProcessingStatus.New]
+            processings = core_processings.get_processings_by_status(status=processing_status, locking=True, bulk_size=self.retrieve_bulk_size)
+
+            self.logger.debug("Main thread get %s [new] processings to process" % len(processings))
+            if processings:
+                self.logger.info("Main thread get %s [new] processings to process" % len(processings))
+            return processings
+        except exceptions.DatabaseException as ex:
+            if 'ORA-00060' in str(ex):
+                self.logger.warn("(cx_Oracle.DatabaseError) ORA-00060: deadlock detected while waiting for resource")
+            else:
+                # raise ex
+                self.logger.error(ex)
+                self.logger.error(traceback.format_exc())
+        return []
 
     def process_new_processing(self, processing):
-        transform_id = processing['transform_id']
-        processing_metadata = processing['processing_metadata']
-        input_coll_id = processing_metadata['input_collection']
-        input_collection = core_catalog.get_collection(coll_id=input_coll_id)
-        output_coll_id = processing_metadata['output_collection']
-        output_collection = core_catalog.get_collection(coll_id=output_coll_id)
-        transform = core_transforms.get_transform(transform_id)
+        try:
+            # transform_id = processing['transform_id']
+            # transform = core_transforms.get_transform(transform_id=transform_id)
+            # work = transform['transform_metadata']['work']
+            proc = processing['processing_metadata']['processing']
+            work = proc.work
+            work.set_agent_attributes(self.agent_attributes)
 
-        ret = self.submit_processing(processing, transform, input_collection, output_collection)
-        if ret:
-            return ret
-        else:
-            return {'processing_id': processing['processing_id'],
-                    'locking': ProcessingLocking.Idle}
+            work.submit_processing(processing)
+            ret = {'processing_id': processing['processing_id'],
+                   'status': ProcessingStatus.Submitting,
+                   'next_poll_at': datetime.datetime.utcnow() + datetime.timedelta(seconds=self.poll_time_period),
+                   # 'expired_at': work.get_expired_at(processing),
+                   'processing_metadata': processing['processing_metadata']}
+            if proc.submitted_at:
+                if not processing['submitted_at'] or processing['submitted_at'] < proc.submitted_at:
+                    ret['submitted_at'] = proc.submitted_at
+
+            # if processing['processing_metadata'] and 'processing' in processing['processing_metadata']:
+            if proc.workload_id:
+                ret['workload_id'] = proc.workload_id
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
+            ret = {'processing_id': processing['processing_id'],
+                   'status': ProcessingStatus.Failed}
+        return ret
 
     def process_new_processings(self):
         ret = []
@@ -92,10 +122,13 @@ class Carrier(BaseAgent):
             try:
                 processing = self.new_task_queue.get()
                 if processing:
+                    self.new_processing_size += 1
                     self.logger.info("Main thread processing new processing: %s" % processing)
                     ret_processing = self.process_new_processing(processing)
+                    self.new_processing_size -= 1
                     if ret_processing:
-                        ret.append(ret_processing)
+                        # ret.append(ret_processing)
+                        self.new_output_queue.put(ret_processing)
             except Exception as ex:
                 self.logger.error(ex)
                 self.logger.error(traceback.format_exc())
@@ -103,165 +136,180 @@ class Carrier(BaseAgent):
 
     def finish_new_processings(self):
         while not self.new_output_queue.empty():
-            processing = self.new_output_queue.get()
-            self.logger.info("Main thread submitted new processing: %s" % (processing['processing_id']))
-            processing_id = processing['processing_id']
-            del processing['processing_id']
-            processing['locking'] = ProcessingLocking.Idle
-            # self.logger.debug("wen: %s" % str(processing))
-            core_processings.update_processing(processing_id=processing_id, parameters=processing)
+            try:
+                processing = self.new_output_queue.get()
+                self.logger.info("Main thread submitted new processing: %s" % (processing['processing_id']))
+                processing_id = processing['processing_id']
+                if 'next_poll_at' not in processing:
+                    processing['next_poll_at'] = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.poll_time_period)
+                del processing['processing_id']
+                processing['locking'] = ProcessingLocking.Idle
+                # self.logger.debug("wen: %s" % str(processing))
+                core_processings.update_processing(processing_id=processing_id, parameters=processing)
+            except Exception as ex:
+                self.logger.error(ex)
+                self.logger.error(traceback.format_exc())
 
-    def get_monitor_processings(self):
+    def get_running_processings(self):
         """
-        Get monitor processing
+        Get running processing
         """
-        processing_status = [ProcessingStatus.Submitting, ProcessingStatus.Submitted, ProcessingStatus.Running, ProcessingStatus.FinishedOnExec]
-        processings = core_processings.get_processings_by_status(status=processing_status,
-                                                                 time_period=self.poll_time_period,
-                                                                 locking=True,
-                                                                 bulk_size=self.retrieve_bulk_size)
-        self.logger.info("Main thread get %s [submitting + submitted + running] processings to process: %s" % (len(processings), str([processing['processing_id'] for processing in processings])))
-        return processings
+        try:
+            if self.running_task_queue.qsize() > 0 or self.running_output_queue.qsize() > 0:
+                return []
 
-    def poll_processing(self, processing, transform, input_collection, output_collection, output_contents):
-        if transform['transform_type'] == TransformType.StageIn:
-            if 'stagein_poller' not in self.plugins:
-                raise AgentPluginError('Plugin stagein_poller is required')
-            return self.plugins['stagein_poller'](processing, transform, input_collection, output_collection, output_contents)
-        if transform['transform_type'] == TransformType.ActiveLearning:
-            if 'activelearning_poller' not in self.plugins:
-                raise AgentPluginError('Plugin activelearning_poller is required')
-            return self.plugins['activelearning_poller'](processing, transform, input_collection, output_collection, output_contents)
-        if transform['transform_type'] == TransformType.HyperParameterOpt:
-            if 'hyperparameteropt_poller' not in self.plugins:
-                raise AgentPluginError('Plugin hyperparameteropt_poller is required')
-            return self.plugins['hyperparameteropt_poller'](processing, transform, input_collection, output_collection, output_contents)
+            self.show_queue_size()
 
-        return None
+            processing_status = [ProcessingStatus.Submitting, ProcessingStatus.Submitted, ProcessingStatus.Running, ProcessingStatus.FinishedOnExec,
+                                 ProcessingStatus.ToCancel, ProcessingStatus.Cancelling, ProcessingStatus.ToSuspend, ProcessingStatus.Suspending,
+                                 ProcessingStatus.ToResume, ProcessingStatus.Resuming, ProcessingStatus.ToExpire, ProcessingStatus.Expiring]
+            processings = core_processings.get_processings_by_status(status=processing_status,
+                                                                     # time_period=self.poll_time_period,
+                                                                     locking=True,
+                                                                     bulk_size=self.retrieve_bulk_size)
 
-    def generate_file_message(self, transform, files):
-        if not files:
-            return None
+            processing_status = [ProcessingStatus.ToCancel, ProcessingStatus.ToSuspend, ProcessingStatus.ToResume, ProcessingStatus.ToExpire]
+            processings_1 = core_processings.get_processings_by_status(status=processing_status,
+                                                                       # time_period=self.poll_time_period,
+                                                                       locking=True,
+                                                                       by_substatus=True,
+                                                                       bulk_size=self.retrieve_bulk_size)
 
-        updated_files_message = []
-        for file in files:
-            updated_file_message = {'scope': file['scope'],
-                                    'name': file['name'],
-                                    'path': file['path'],
-                                    'status': file['status'].name}
-            updated_files_message.append(updated_file_message)
+            processings = processings + processings_1
 
-        workload_id = None
-        if 'workload_id' in transform['transform_metadata']:
-            workload_id = transform['transform_metadata']['workload_id']
+            self.logger.debug("Main thread get %s [submitting + submitted + running] processings to process: %s" % (len(processings), str([processing['processing_id'] for processing in processings])))
+            if processings:
+                self.logger.info("Main thread get %s [submitting + submitted + running] processings to process: %s" % (len(processings), str([processing['processing_id'] for processing in processings])))
+            return processings
+        except exceptions.DatabaseException as ex:
+            if 'ORA-00060' in str(ex):
+                self.logger.warn("(cx_Oracle.DatabaseError) ORA-00060: deadlock detected while waiting for resource")
+            else:
+                # raise ex
+                self.logger.error(ex)
+                self.logger.error(traceback.format_exc())
+        return []
 
-        if transform['transform_type'] in [TransformType.StageIn, TransformType.StageIn.value]:
-            msg_type = 'file_stagein'
-            msg_type_c = MessageType.StageInFile
-        elif transform['transform_type'] in [TransformType.ActiveLearning, TransformType.ActiveLearning.value]:
-            msg_type = 'file_activelearning'
-            msg_type_c = MessageType.ActiveLearningFile
-        elif transform['transform_type'] in [TransformType.HyperParameterOpt, TransformType.HyperParameterOpt.value]:
-            msg_type = 'file_hyperparameteropt'
-            msg_type_c = MessageType.HyperParameterOptFile
-        else:
-            msg_type = 'file_unknown'
-            msg_type_c = MessageType.UnknownFile
+    def get_collection_ids(self, collections):
+        coll_ids = []
+        for coll in collections:
+            coll_ids.append(coll.coll_id)
+        return coll_ids
 
-        msg_content = {'msg_type': msg_type,
-                       'workload_id': workload_id,
-                       'files': updated_files_message}
-        file_msg_content = {'msg_type': msg_type_c,
-                            'status': MessageStatus.New,
-                            'source': MessageSource.Carrier,
-                            'transform_id': transform['transform_id'],
-                            'num_contents': len(updated_files_message),
-                            'msg_content': msg_content}
-        return file_msg_content
+    def process_running_processing(self, processing):
+        try:
+            transform_id = processing['transform_id']
+            # transform = core_transforms.get_transform(transform_id=transform_id)
+            # work = transform['transform_metadata']['work']
+            # work = processing['processing_metadata']['work']
+            # work.set_agent_attributes(self.agent_attributes)
+            proc = processing['processing_metadata']['processing']
+            work = proc.work
+            work.set_agent_attributes(self.agent_attributes)
 
-    def process_monitor_processing(self, processing):
-        transform_id = processing['transform_id']
-        processing_metadata = processing['processing_metadata']
-        input_coll_id = processing_metadata['input_collection']
-        input_collection = core_catalog.get_collection(coll_id=input_coll_id)
-        output_coll_id = processing_metadata['output_collection']
-        output_collection = core_catalog.get_collection(coll_id=output_coll_id)
-        output_contents = core_catalog.get_contents_by_coll_id_status(coll_id=output_coll_id)
-        transform = core_transforms.get_transform(transform_id)
+            input_collections = work.get_input_collections()
+            output_collections = work.get_output_collections()
+            log_collections = work.get_log_collections()
 
-        ret_poll = self.poll_processing(processing, transform, input_collection, output_collection, output_contents)
-        if not ret_poll:
-            return {'processing_id': processing['processing_id'],
-                    'locking': ProcessingLocking.Idle}
+            input_coll_ids = self.get_collection_ids(input_collections)
+            output_coll_ids = self.get_collection_ids(output_collections)
+            log_coll_ids = self.get_collection_ids(log_collections)
 
-        new_files = []
-        if 'new_files' in ret_poll:
-            new_files = ret_poll['new_files']
-        updated_files = ret_poll['updated_files']
-        file_msgs = []
-        if new_files:
-            file_msg = self.generate_file_message(transform, new_files)
-            file_msgs.append(file_msg)
-        if updated_files:
-            file_msg = self.generate_file_message(transform, updated_files)
-            file_msgs.append(file_msg)
+            input_output_maps = core_transforms.get_transform_input_output_maps(transform_id,
+                                                                                input_coll_ids=input_coll_ids,
+                                                                                output_coll_ids=output_coll_ids,
+                                                                                log_coll_ids=log_coll_ids)
 
-        processing_status = ret_poll['processing_updates']['status']
-        processing_metadata = ret_poll['processing_updates']['processing_metadata']
+            processing_substatus = None
+            is_operation = False
+            if processing['substatus'] in [ProcessingStatus.ToCancel]:
+                work.abort_processing(processing)
+                is_operation = True
+                processing_substatus = ProcessingStatus.Cancelling
+            if processing['substatus'] in [ProcessingStatus.ToSuspend]:
+                work.suspend_processing(processing)
+                is_operation = True
+                processing_substatus = ProcessingStatus.Suspending
+            if processing['substatus'] in [ProcessingStatus.ToResume]:
+                work.resume_processing(processing)
+                is_operation = True
+                processing_substatus = ProcessingStatus.Resuming
+            if processing['substatus'] in [ProcessingStatus.ToExpire]:
+                work.expire_processing(processing)
+                is_operation = True
+                processing_substatus = ProcessingStatus.Expiring
 
-        new_processing = None
-        if processing_status == ProcessingStatus.FinishedOnStep:
-            if 'new_processing' in ret_poll:
-                new_processing = ret_poll['new_processing']
+            # work = processing['processing_metadata']['work']
+            # outputs = work.poll_processing()
+            processing_update, content_updates = work.poll_processing_updates(processing, input_output_maps)
 
-        processing_parameters = {'status': processing_status,
-                                 'locking': ProcessingLocking.Idle,
-                                 'processing_metadata': processing_metadata}
-        if 'substatus' in ret_poll['processing_updates']:
-            processing_parameters['substatus'] = ret_poll['processing_updates']['substatus']
+            if processing_update:
+                processing_update['parameters']['locking'] = ProcessingLocking.Idle
+            else:
+                processing_update = {'processing_id': processing['processing_id'],
+                                     'parameters': {'locking': ProcessingLocking.Idle}}
 
-        if 'output_metadata' in ret_poll['processing_updates']:
-            processing_parameters['output_metadata'] = ret_poll['processing_updates']['output_metadata']
-        updated_processing = {'processing_id': processing['processing_id'],
-                              'parameters': processing_parameters}
+            if processing_substatus:
+                processing_update['parameters']['substatus'] = processing_substatus
 
-        ret = {'transform': transform,
-               'processing_updates': updated_processing,
-               'new_processing': new_processing,
-               'updated_files': updated_files,
-               'new_files': new_files,
-               'file_message': file_msgs}
+            if not is_operation:
+                next_poll_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.poll_time_period)
+            else:
+                next_poll_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.poll_operation_time_period)
+
+            if proc.submitted_at:
+                if not processing['submitted_at'] or processing['submitted_at'] < proc.submitted_at:
+                    processing_update['parameters']['submitted_at'] = proc.submitted_at
+
+            processing_update['parameters']['next_poll_at'] = next_poll_at
+            # processing_update['parameters']['expired_at'] = work.get_expired_at(processing)
+            processing_update['parameters']['processing_metadata'] = processing['processing_metadata']
+
+            ret = {'processing_update': processing_update,
+                   'content_updates': content_updates}
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
+            processing_update = {'processing_id': processing['processing_id'],
+                                 'parameters': {'status': ProcessingStatus.Failed,
+                                                'locking': ProcessingLocking.Idle}}
+            ret = {'processing_update': processing_update,
+                   'content_updates': []}
         return ret
 
-    def process_monitor_processings(self):
+    def process_running_processings(self):
         ret = []
-        while not self.monitor_task_queue.empty():
+        while not self.running_task_queue.empty():
             try:
-                processing = self.monitor_task_queue.get()
+                processing = self.running_task_queue.get()
                 if processing:
-                    self.logger.info("Main thread processing monitor processing: %s" % processing)
-                    ret_processing = self.process_monitor_processing(processing)
+                    self.running_processing_size += 1
+                    self.logger.debug("Main thread processing running processing: %s" % processing)
+                    self.logger.info("Main thread processing running processing: %s" % processing['processing_id'])
+                    ret_processing = self.process_running_processing(processing)
+                    self.running_processing_size -= 1
                     if ret_processing:
-                        ret.append(ret_processing)
+                        # ret.append(ret_processing)
+                        self.running_output_queue.put(ret_processing)
             except Exception as ex:
                 self.logger.error(ex)
                 self.logger.error(traceback.format_exc())
         return ret
 
-    def finish_monitor_processings(self):
-        while not self.monitor_output_queue.empty():
-            processing = self.monitor_output_queue.get()
-            if processing:
-                self.logger.info("Main thread processing(processing_id: %s) status changed to %s" % (processing['processing_updates']['processing_id'],
-                                                                                                     processing['processing_updates']['parameters']['status']))
+    def finish_running_processings(self):
+        while not self.running_output_queue.empty():
+            try:
+                processing = self.running_output_queue.get()
+                if processing:
+                    self.logger.info("Main thread processing(processing_id: %s) updates: %s" % (processing['processing_update']['processing_id'],
+                                                                                                processing['processing_update']['parameters']))
 
-                self.logger.debug("wen: processing %s" % str(processing))
-                core_processings.update_processing_with_collection_contents(updated_processing=processing['processing_updates'],
-                                                                            new_processing=processing['new_processing'],
-                                                                            updated_files=processing['updated_files'],
-                                                                            new_files=processing['new_files'],
-                                                                            file_msg_content=processing['file_message'],
-                                                                            message_bulk_size=self.message_bulk_size)
+                    # self.logger.info("Main thread finishing running processing %s" % str(processing))
+                    core_processings.update_processing_contents(processing_update=processing['processing_update'],
+                                                                content_updates=processing['content_updates'])
+            except Exception as ex:
+                self.logger.error(ex)
+                self.logger.error(traceback.format_exc())
 
     def clean_locks(self):
         self.logger.info("clean locking")
@@ -275,19 +323,26 @@ class Carrier(BaseAgent):
             self.logger.info("Starting main thread")
 
             self.load_plugins()
+            self.init()
 
-            task = self.create_task(task_func=self.get_new_processings, task_output_queue=self.new_task_queue, task_args=tuple(), task_kwargs={}, delay_time=5, priority=1)
+            self.add_default_tasks()
+
+            task = self.create_task(task_func=self.get_new_processings, task_output_queue=self.new_task_queue, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
             self.add_task(task)
-            task = self.create_task(task_func=self.process_new_processings, task_output_queue=self.new_output_queue, task_args=tuple(), task_kwargs={}, delay_time=2, priority=1)
-            self.add_task(task)
-            task = self.create_task(task_func=self.finish_new_processings, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=2, priority=1)
+            for _ in range(self.num_threads):
+                # task = self.create_task(task_func=self.process_new_processings, task_output_queue=self.new_output_queue, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
+                task = self.create_task(task_func=self.process_new_processings, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
+                self.add_task(task)
+            task = self.create_task(task_func=self.finish_new_processings, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
             self.add_task(task)
 
-            task = self.create_task(task_func=self.get_monitor_processings, task_output_queue=self.monitor_task_queue, task_args=tuple(), task_kwargs={}, delay_time=5, priority=1)
+            task = self.create_task(task_func=self.get_running_processings, task_output_queue=self.running_task_queue, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
             self.add_task(task)
-            task = self.create_task(task_func=self.process_monitor_processings, task_output_queue=self.monitor_output_queue, task_args=tuple(), task_kwargs={}, delay_time=2, priority=1)
-            self.add_task(task)
-            task = self.create_task(task_func=self.finish_monitor_processings, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=2, priority=1)
+            for _ in range(self.num_threads):
+                # task = self.create_task(task_func=self.process_running_processings, task_output_queue=self.running_output_queue, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
+                task = self.create_task(task_func=self.process_running_processings, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
+                self.add_task(task)
+            task = self.create_task(task_func=self.finish_running_processings, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
             self.add_task(task)
 
             task = self.create_task(task_func=self.clean_locks, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1800, priority=1)

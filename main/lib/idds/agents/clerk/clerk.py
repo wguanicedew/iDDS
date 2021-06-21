@@ -8,7 +8,7 @@
 # Authors:
 # - Wen Guan, <wen.guan@cern.ch>, 2019
 
-import copy
+import datetime
 import traceback
 try:
     # python 3
@@ -17,12 +17,12 @@ except ImportError:
     # Python 2
     from Queue import Queue
 
-from idds.common.constants import (Sections, RequestStatus, RequestLocking, RequestType,
-                                   TransformStatus, CollectionRelationType,
-                                   CollectionType, CollectionStatus, TransformType)
-from idds.common.exceptions import AgentPluginError
-from idds.common.utils import setup_logging, convert_request_type_to_transform_type
-from idds.core import requests as core_requests, transforms as core_transforms
+from idds.common import exceptions
+from idds.common.constants import (Sections, RequestStatus, RequestLocking,
+                                   TransformStatus)
+from idds.common.utils import setup_logging
+from idds.core import (requests as core_requests,
+                       transforms as core_transforms)
 from idds.agents.common.baseagent import BaseAgent
 
 setup_logging(__name__)
@@ -33,173 +33,124 @@ class Clerk(BaseAgent):
     Clerk works to process requests and converts requests to transforms.
     """
 
-    def __init__(self, num_threads=1, poll_time_period=1800, retrieve_bulk_size=None, **kwargs):
+    def __init__(self, num_threads=1, poll_time_period=10, retrieve_bulk_size=10, pending_time=None, **kwargs):
         super(Clerk, self).__init__(num_threads=num_threads, **kwargs)
         self.poll_time_period = int(poll_time_period)
         self.retrieve_bulk_size = int(retrieve_bulk_size)
         self.config_section = Sections.Clerk
+        if pending_time:
+            self.pending_time = float(pending_time)
+        else:
+            self.pending_time = None
 
         self.new_task_queue = Queue()
         self.new_output_queue = Queue()
-        self.monitor_task_queue = Queue()
-        self.monitor_output_queue = Queue()
+        self.running_task_queue = Queue()
+        self.running_output_queue = Queue()
+        self.new_processing_size = 0
+        self.running_processing_size = 0
+
+    def show_queue_size(self):
+        q_str = "new queue size: %s, processing size: %s, output queue size: %s, " % (self.new_task_queue.qsize(),
+                                                                                      self.new_processing_size,
+                                                                                      self.new_output_queue.qsize())
+        q_str += "running queue size: %s, processing size: %s,  output queue size: %s" % (self.running_task_queue.qsize(),
+                                                                                          self.running_processing_size,
+                                                                                          self.running_output_queue.qsize())
+        self.logger.debug(q_str)
+
+    def generate_transform(self, req, work):
+        wf = req['request_metadata']['workflow']
+
+        new_transform = {'request_id': req['request_id'],
+                         'workload_id': req['workload_id'],
+                         'transform_type': work.get_work_type(),
+                         'transform_tag': work.get_work_tag(),
+                         'priority': req['priority'],
+                         'status': TransformStatus.New,
+                         'retries': 0,
+                         # 'expired_at': req['expired_at'],
+                         'expired_at': None,
+                         'transform_metadata': {'internal_id': work.get_internal_id(),
+                                                'template_work_id': work.get_template_work_id(),
+                                                'sequence_id': work.get_sequence_id(),
+                                                'work_name': work.get_work_name(),
+                                                'work': work,
+                                                'workflow': wf}
+                         # 'running_metadata': {'work_data': new_work.get_running_data()}
+                         # 'collections': related_collections
+                         }
+
+        return new_transform
 
     def get_new_requests(self):
         """
         Get new requests to process
         """
-        # req_status = [RequestStatus.TransformingOpen]
-        # reqs_open = core_requests.get_requests_by_status_type(status=req_status, time_period=3600)
-        # self.logger.info("Main thread get %s TransformingOpen requests to process" % len(reqs_open))
+        try:
+            # req_status = [RequestStatus.TransformingOpen]
+            # reqs_open = core_requests.get_requests_by_status_type(status=req_status, time_period=3600)
+            # self.logger.info("Main thread get %s TransformingOpen requests to process" % len(reqs_open))
 
-        req_status = [RequestStatus.New, RequestStatus.Extend]
-        reqs_new = core_requests.get_requests_by_status_type(status=req_status, locking=True,
-                                                             bulk_size=self.retrieve_bulk_size)
-        self.logger.info("Main thread get %s [New+Extend] requests to process" % len(reqs_new))
+            if self.new_task_queue.qsize() > 0 or self.new_output_queue.qsize() > 0:
+                return []
 
-        return reqs_new
+            self.show_queue_size()
 
-    def get_transform_with_input_collection(self, transform_type, transform_tag, coll_scope, coll_name, request_metadata):
-        transforms = core_transforms.get_transforms_with_input_collection(transform_type=transform_type,
-                                                                          transform_tag=transform_tag,
-                                                                          coll_scope=coll_scope,
-                                                                          coll_name=coll_name)
-        if not transforms:
-            return None
+            req_status = [RequestStatus.New, RequestStatus.Extend]
+            reqs_new = core_requests.get_requests_by_status_type(status=req_status, locking=True,
+                                                                 bulk_size=self.retrieve_bulk_size)
 
-        if transform_type in [TransformType.StageIn, TransformType.StageIn.value]:
-            for transform in transforms:
-                transform_metadata = transform['transform_metadata']
-                if ((('workload_id' in transform_metadata and 'workload_id' in request_metadata               # noqa: W503
-                    and transform_metadata['workload_id'] == request_metadata['workload_id'])                 # noqa: W503
-                    or ('workload_id' not in transform_metadata and 'workload_id' not in request_metadata))   # noqa: W503
-                    and (('rule_id' in transform_metadata and 'rule_id' in request_metadata                   # noqa: W503
-                    and transform_metadata['rule_id'] == request_metadata['rule_id'])                         # noqa: W503
-                    or ('rule_id' not in transform_metadata and 'rule_id' not in request_metadata))):         # noqa: W503
-                    return transform
-        else:
-            return None
+            self.logger.debug("Main thread get %s [New+Extend] requests to process" % len(reqs_new))
+            if reqs_new:
+                self.logger.info("Main thread get %s [New+Extend] requests to process" % len(reqs_new))
 
-    def get_collections(self, scope, name, req=None):
-        if (req and req['request_metadata'] and 'is_pseudo_input' in req['request_metadata']                  # noqa: W503
-            and req['request_metadata']['is_pseudo_input'] == True):                                          # noqa: W503
-            collection = {'scope': scope, 'name': name, 'total_files': 1, 'bytes': 0, 'processed_files': 1,
-                          'coll_type': CollectionType.PseudoDataset}
-            return [collection]
-        else:
-            if 'collection_lister' not in self.plugins:
-                raise AgentPluginError('Plugin collection_lister is required')
-            return self.plugins['collection_lister'](scope, name)
-
-    def get_output_collection(self, input_collection, request_type, transform_tag):
-        if request_type in [RequestType.StageIn, RequestType.StageIn.value,
-                            RequestType.ActiveLearning, RequestType.ActiveLearning.value,
-                            RequestType.HyperParameterOpt, RequestType.HyperParameterOpt.value]:
-            collection = input_collection
-            output_collection = copy.deepcopy(collection)
-            # output_collection['coll_type'] = CollectionType.Dataset
-            output_collection['relation_type'] = CollectionRelationType.Output
-            output_collection['status'] = CollectionStatus.New
-        else:
-            collection = input_collection
-            output_collection = copy.deepcopy(collection)
-            output_collection['name'] = collection['name'] + '_iDDS.%s.%s' % (request_type.name, transform_tag)
-            output_collection['coll_type'] = CollectionType.Dataset
-            output_collection['relation_type'] = CollectionRelationType.Output
-            output_collection['status'] = CollectionStatus.New
-        return output_collection
-
-    def get_log_collection(self, input_collection, request_type, transform_tag):
-        if request_type in [RequestType.StageIn, RequestType.StageIn.value]:
-            return None
-
-        collection = input_collection
-        log_collection = copy.deepcopy(collection)
-        log_collection['name'] = collection['name'] + '_iDDS.%s.%s.log' % (request_type.name, transform_tag)
-        log_collection['coll_type'] = CollectionType.Dataset
-        log_collection['relation_type'] = CollectionRelationType.Log
-        log_collection['status'] = CollectionStatus.New
-        return log_collection
+            return reqs_new
+        except exceptions.DatabaseException as ex:
+            if 'ORA-00060' in str(ex):
+                self.logger.warn("(cx_Oracle.DatabaseError) ORA-00060: deadlock detected while waiting for resource")
+            else:
+                # raise ex
+                self.logger.error(ex)
+                self.logger.error(traceback.format_exc())
+        return []
 
     def process_new_request(self, req):
         try:
-            collections = self.get_collections(req['scope'], req['name'], req)
-            if collections:
-                transforms_to_add = []
-                transforms_to_extend = []
-                for collection in collections:
-                    transform_type = convert_request_type_to_transform_type(req['request_type'])
-                    transform = self.get_transform_with_input_collection(transform_type=transform_type,
-                                                                         transform_tag=req['transform_tag'],
-                                                                         coll_scope=collection['scope'],
-                                                                         coll_name=collection['name'],
-                                                                         request_metadata=req['request_metadata'])
+            self.logger.info("Processing request(%s)" % (req['request_id']))
+            workflow = req['request_metadata']['workflow']
 
-                    if transform:
-                        new_transform_metadata = copy.deepcopy(transform['transform_metadata'])
-                        if req['request_metadata']:
-                            for key in req['request_metadata']:
-                                new_transform_metadata[key] = req['request_metadata'][key]
+            # wf = workflow.copy()
+            wf = workflow
+            works = wf.get_new_works()
+            transforms = []
+            for work in works:
+                # new_work = work.copy()
+                new_work = work
+                new_work.add_proxy(wf.get_proxy())
+                # new_work.create_processing()
 
-                        to_extend = {'transform_id': transform['transform_id'],
-                                     'priority': req['priority'] if req['priority'] > transform['priority'] else transform['priority'],
-                                     'status': TransformStatus.Extend,
-                                     'transform_metadata': new_transform_metadata,
-                                     'expired_at': req['expired_at'] if req['expired_at'] > transform['expired_at'] else transform['expired_at']}
-                        transforms_to_extend.append(to_extend)
-                    else:
-                        related_collections = {'input_collections': [], 'output_collections': [], 'log_collections': []}
-                        input_collection = {'transform_id': None,
-                                            'coll_type': collection['coll_type'],
-                                            'scope': collection['scope'],
-                                            'name': collection['name'],
-                                            'relation_type': CollectionRelationType.Input,
-                                            'status': CollectionStatus.New,
-                                            'expired_at': req['expired_at']}
-                        related_collections['input_collections'].append(input_collection)
-                        output_collection = self.get_output_collection(input_collection, req['request_type'], req['transform_tag'])
-                        if output_collection:
-                            related_collections['output_collections'].append(output_collection)
-                        log_collection = self.get_log_collection(input_collection, req['request_type'], req['transform_tag'])
-                        if log_collection:
-                            related_collections['log_collections'].append(log_collection)
+                transform = self.generate_transform(req, work)
+                transforms.append(transform)
+            self.logger.debug("Processing request(%s): new transforms: %s" % (req['request_id'],
+                                                                              str(transforms)))
+            # processing_metadata = req['processing_metadata']
+            # processing_metadata = {'workflow_data': wf.get_running_data()}
 
-                        transform_metadata = copy.deepcopy(req['request_metadata'])
-                        if 'processing_metadata' in transform_metadata:
-                            del transform_metadata['processing_metadata']
-
-                        transform = {'request_id': req['request_id'],
-                                     'transform_type': convert_request_type_to_transform_type(req['request_type']),
-                                     'transform_tag': req['transform_tag'],
-                                     'priority': req['priority'],
-                                     'status': TransformStatus.New,
-                                     'retries': 0,
-                                     'expired_at': req['expired_at'],
-                                     'transform_metadata': transform_metadata,
-                                     'collections': related_collections
-                                     }
-                        # core_transforms.add_transform(**transform)
-                        transforms_to_add.append(transform)
-                ret_req = {'request_id': req['request_id'],
-                           'status': RequestStatus.Transforming,
-                           'processing_metadata': {'total_collections': len(collections),
-                                                   'transforms_to_add': len(transforms_to_add),
-                                                   'transforms_to_extend': len(transforms_to_extend)},
-                           'transforms_to_add': transforms_to_add,
-                           'transforms_to_extend': transforms_to_extend}
-                if not req['processing_metadata'] or 'request_metadata_history' not in req['processing_metadata']:
-                    ret_req['processing_metadata']['request_metadata_history'] = []
-                ret_req['processing_metadata']['request_metadata_history'].append(req['request_metadata'])
-            else:
-                ret_req = {'request_id': req['request_id'],
-                           'status': RequestStatus.Failed,
-                           'errors': {'msg': 'No matching datasets with %s:%s' % (req['scope'], req['name'])}}
+            ret_req = {'request_id': req['request_id'],
+                       'parameters': {'status': RequestStatus.Transforming,
+                                      'locking': RequestLocking.Idle,
+                                      'next_poll_at': datetime.datetime.utcnow() + datetime.timedelta(seconds=self.poll_time_period),
+                                      # 'processing_metadata': processing_metadata,
+                                      'request_metadata': req['request_metadata']},
+                       'new_transforms': transforms}
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
             ret_req = {'request_id': req['request_id'],
-                       'status': RequestStatus.Failed,
-                       'errors': {'msg': '%s: %s' % (ex, traceback.format_exc())}}
+                       'parameters': {'status': RequestStatus.Failed,
+                                      'locking': RequestLocking.Idle,
+                                      'errors': {'msg': '%s: %s' % (ex, traceback.format_exc())}}}
         return ret_req
 
     def process_new_requests(self):
@@ -211,10 +162,13 @@ class Clerk(BaseAgent):
             try:
                 req = self.new_task_queue.get()
                 if req:
+                    self.new_processing_size += 1
                     self.logger.info("Main thread processing new requst: %s" % req)
                     ret_req = self.process_new_request(req)
+                    self.new_processing_size -= 1
                     if ret_req:
-                        ret.append(ret_req)
+                        # ret.append(ret_req)
+                        self.new_output_queue.put(ret_req)
             except Exception as ex:
                 self.logger.error(ex)
                 self.logger.error(traceback.format_exc())
@@ -225,111 +179,293 @@ class Clerk(BaseAgent):
             try:
                 req = self.new_output_queue.get()
                 self.logger.info("Main thread finished processing requst: %s" % req)
-                parameter = {'status': req['status'], 'locking': RequestLocking.Idle}
+                req['parameters']['locking'] = RequestLocking.Idle
 
-                if 'processing_metadata' not in req or not req['processing_metadata']:
-                    processing_metadata = {}
+                if 'new_transforms' in req:
+                    new_transforms = req['new_transforms']
                 else:
-                    processing_metadata = req['processing_metadata']
+                    new_transforms = []
 
-                parameter['processing_metadata'] = processing_metadata
-
-                if 'errors' in req:
-                    parameter['errors'] = req['errors']
-
-                if 'transforms_to_add' in req:
-                    transforms_to_add = req['transforms_to_add']
+                if 'update_transforms' in req:
+                    update_transforms = req['update_transforms']
                 else:
-                    transforms_to_add = []
-                if 'transforms_to_extend' in req:
-                    transforms_to_extend = req['transforms_to_extend']
-                else:
-                    transforms_to_extend = []
-                core_requests.update_request_with_transforms(req['request_id'], parameter, transforms_to_add, transforms_to_extend)
+                    update_transforms = {}
+
+                core_requests.update_request_with_transforms(req['request_id'], req['parameters'],
+                                                             new_transforms=new_transforms,
+                                                             update_transforms=update_transforms)
             except Exception as ex:
                 self.logger.error(ex)
                 self.logger.error(traceback.format_exc())
 
-    def get_monitor_requests(self):
+    def get_running_requests(self):
         """
-        Get requests to monitor
+        Get running requests
         """
-        req_status = [RequestStatus.Transforming]
-        reqs = core_requests.get_requests_by_status_type(status=req_status, time_period=self.poll_time_period,
-                                                         locking=True, bulk_size=self.retrieve_bulk_size)
-        self.logger.info("Main thread get %s Transforming requests to monitor" % len(reqs))
-        return reqs
+        try:
+            if self.running_task_queue.qsize() > 0 or self.running_output_queue.qsize() > 0:
+                return []
 
-    def process_monitor_request(self, req):
-        """
-        process monitor request
-        """
-        transforms = core_transforms.get_transforms(request_id=req['request_id'])
-        transform_status = {}
-        for transform in transforms:
-            status_name = transform['status'].name
-            if status_name not in transform_status:
-                transform_status[status_name] = 1
+            self.show_queue_size()
+
+            req_status = [RequestStatus.Transforming, RequestStatus.ToCancel, RequestStatus.Cancelling,
+                          RequestStatus.ToSuspend, RequestStatus.Suspending,
+                          RequestStatus.ToExpire, RequestStatus.Expiring,
+                          RequestStatus.Resuming]
+            reqs = core_requests.get_requests_by_status_type(status=req_status, time_period=None,
+                                                             locking=True, bulk_size=self.retrieve_bulk_size)
+
+            req_status = [RequestStatus.ToSuspend, RequestStatus.ToCancel, RequestStatus.ToResume, RequestStatus.ToExpire]
+            reqs_1 = core_requests.get_requests_by_status_type(status=req_status, time_period=None,
+                                                               locking=True, by_substatus=True, bulk_size=self.retrieve_bulk_size)
+
+            reqs = reqs + reqs_1
+
+            self.logger.debug("Main thread get %s Transforming requests to running" % len(reqs))
+            if reqs:
+                self.logger.info("Main thread get %s Transforming requests to running" % len(reqs))
+            return reqs
+        except exceptions.DatabaseException as ex:
+            if 'ORA-00060' in str(ex):
+                self.logger.warn("(cx_Oracle.DatabaseError) ORA-00060: deadlock detected while waiting for resource")
             else:
-                transform_status[status_name] += 1
-        processing_metadata = req['processing_metadata']
+                # raise ex
+                self.logger.error(ex)
+                self.logger.error(traceback.format_exc())
+        return []
 
-        processing_metadata['transform_status'] = transform_status
+    def process_running_request_real(self, req):
+        """
+        process running request
+        """
+        self.logger.info("process_running_request: request_id: %s" % req['request_id'])
+        wf = req['request_metadata']['workflow']
 
-        transform_status_keys = list(transform_status.keys())
-        if len(transform_status_keys) == 0:
-            ret_req = {'request_id': req['request_id'],
-                       'status': RequestStatus.Failed,
-                       'processing_metadata': processing_metadata,
-                       'errors': {'msg': 'No transforms founded(no collections founded)'}
-                       }
-        elif len(transform_status_keys) == 1:
-            if transform_status_keys[0] in [TransformStatus.New, TransformStatus.New.name,
-                                            TransformStatus.Transforming, TransformStatus.Transforming.name,
-                                            TransformStatus.Extend, TransformStatus.Extend.name]:
-                ret_req = {'request_id': req['request_id'],
-                           'status': RequestStatus.Transforming,
-                           'processing_metadata': processing_metadata
-                           }
+        new_transforms = []
+        if req['status'] in [RequestStatus.Transforming]:
+            # new works
+            works = wf.get_new_works()
+            for work in works:
+                # new_work = work.copy()
+                new_work = work
+                new_work.add_proxy(wf.get_proxy())
+                new_transform = self.generate_transform(req, new_work)
+                new_transforms.append(new_transform)
+            self.logger.debug("Processing request(%s): new transforms: %s" % (req['request_id'],
+                                                                              str(new_transforms)))
+
+        to_update_transforms = wf.to_update_transforms
+        if to_update_transforms:
+            tfs_status = {}
+            for tf_id in to_update_transforms:
+                try:
+                    core_transforms.update_transform(transform_id=tf_id, parameters=to_update_transforms[tf_id])
+                except Exception as ex:
+                    self.logger.warn("failed to update tranform %s to %s, record it for later update: %s" % (tf_id, to_update_transforms[tf_id]['substatus'], str(ex)))
+                    tfs_status[tf_id] = to_update_transforms[tf_id]
+            wf.to_update_transforms = tfs_status
+
+        # current works
+        works = wf.get_current_works()
+        # print(works)
+        for work in works:
+            # print(work.get_work_id())
+            tf = core_transforms.get_transform(transform_id=work.get_work_id())
+            transform_work = tf['transform_metadata']['work']
+            # work_status = WorkStatus(tf['status'].value)
+            # work.set_status(work_status)
+            work.sync_work_data(status=tf['status'], substatus=tf['substatus'], work=transform_work)
+        wf.refresh_works()
+
+        is_operation = False
+        if wf.is_terminated():
+            if wf.is_finished():
+                req_status = RequestStatus.Finished
+            elif wf.is_expired():
+                req_status = RequestStatus.Expired
+            elif wf.is_subfinished():
+                req_status = RequestStatus.SubFinished
+            elif wf.is_failed():
+                req_status = RequestStatus.Failed
+            elif wf.is_cancelled():
+                req_status = RequestStatus.Cancelled
+            elif wf.is_suspended():
+                req_status = RequestStatus.Suspended
             else:
-                ret_req = {'request_id': req['request_id'],
-                           'status': dict(RequestStatus.__members__)[transform_status_keys[0]],
-                           'processing_metadata': processing_metadata
-                           }
+                req_status = RequestStatus.Failed
+            req_msg = wf.get_terminated_msg()
         else:
+            req_msg = None
+            if req['status'] in [RequestStatus.ToSuspend, RequestStatus.Suspending]:
+                req_status = RequestStatus.Suspending
+                is_operation = True
+            elif req['status'] in [RequestStatus.ToCancel, RequestStatus.Cancelling]:
+                req_status = RequestStatus.Cancelling
+                is_operation = True
+            elif wf.is_to_expire(req['expired_at'], self.pending_time, request_id=req['request_id']):
+                wf.expired = True
+                req_status = RequestStatus.ToExpire
+                is_operation = True
+                req_msg = "Workflow expired"
+            else:
+                req_status = RequestStatus.Transforming
+
+        # processing_metadata['workflow_data'] = wf.get_running_data()
+        if not is_operation:
+            next_poll_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.poll_time_period)
+        else:
+            next_poll_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.poll_operation_time_period)
+
+        parameters = {'status': req_status,
+                      'locking': RequestLocking.Idle,
+                      'next_poll_at': next_poll_at,
+                      'request_metadata': req['request_metadata'],
+                      'errors': {'msg': req_msg}}
+
+        if req_status == RequestStatus.ToExpire:
+            parameters['substatus'] = req_status
+
+        ret = {'request_id': req['request_id'],
+               'parameters': parameters,
+               'new_transforms': new_transforms}   # 'update_transforms': update_transforms}
+        return ret
+
+    def process_running_request(self, req):
+        """
+        process running request
+        """
+        try:
+            ret_req = self.process_running_request_real(req)
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
             ret_req = {'request_id': req['request_id'],
-                       'status': RequestStatus.Transforming,
-                       'processing_metadata': processing_metadata
-                       }
+                       'parameters': {'status': RequestStatus.Failed,
+                                      'locking': RequestLocking.Idle,
+                                      'errors': {'msg': '%s: %s' % (ex, traceback.format_exc())}}}
         return ret_req
 
-    def process_monitor_requests(self):
+    def process_operating_request_real(self, req):
         """
-        Process monitor request
+        process ToCancel/ToSuspend/ToResume/ToExpire request
+        """
+        if req['substatus'] == RequestStatus.ToCancel:
+            tf_status = TransformStatus.ToCancel
+            req_status = RequestStatus.Cancelling
+        if req['substatus'] == RequestStatus.ToSuspend:
+            tf_status = TransformStatus.ToSuspend
+            req_status = RequestStatus.Suspending
+        if req['substatus'] == RequestStatus.ToResume:
+            tf_status = TransformStatus.ToResume
+            req_status = RequestStatus.Resuming
+        if req['substatus'] == RequestStatus.ToExpire:
+            tf_status = TransformStatus.ToExpire
+            req_status = RequestStatus.Expiring
+
+        processing_metadata = req['processing_metadata']
+
+        wf = req['request_metadata']['workflow']
+        if req['substatus'] == RequestStatus.ToResume:
+            wf.resume_works()
+
+        if 'operations' not in processing_metadata:
+            processing_metadata['operations'] = []
+        processing_metadata['operations'].append({'status': req['substatus'], 'time': datetime.datetime.utcnow()})
+
+        tfs = core_transforms.get_transforms(request_id=req['request_id'])
+        tfs_status = {}
+        for tf in tfs:
+            # if tf['status'] not in [RequestStatus.Finished, RequestStatus.SubFinished,
+            #                         RequestStatus.Failed, RequestStatus.Cancelling,
+            #                         RequestStatus.Cancelled, RequestStatus.Suspending,
+            #                         RequestStatus.Suspended]:
+            try:
+                core_transforms.update_transform(transform_id=tf['transform_id'], parameters={'substatus': tf_status})
+            except Exception as ex:
+                self.logger.warn("Failed to update tranform %s to %s, record it for later update: %s" % (tf['transform_id'], tf_status, str(ex)))
+                tfs_status[tf['transform_id']] = {'substatus': tf_status}
+        wf.to_update_transforms = tfs_status
+
+        # processing_metadata['workflow_data'] = wf.get_running_data()
+
+        ret_req = {'request_id': req['request_id'],
+                   'parameters': {'status': req_status,
+                                  'substatus': req_status,
+                                  'next_poll_at': datetime.datetime.utcnow() + datetime.timedelta(seconds=self.poll_operation_time_period),
+                                  'request_metadata': req['request_metadata'],
+                                  'processing_metadata': processing_metadata,
+                                  'locking': RequestLocking.Idle},
+                   # 'update_transforms': tfs_status
+                   'update_transforms': {}
+                   }
+        return ret_req
+
+    def process_operating_request(self, req):
+        """
+        process ToCancel/ToSuspend/ToResume/ToExpire request
+        """
+        try:
+            ret_req = self.process_operating_request_real(req)
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
+            ret_req = {'request_id': req['request_id'],
+                       'parameters': {'status': RequestStatus.Failed,
+                                      'locking': RequestLocking.Idle,
+                                      'errors': {'msg': '%s: %s' % (ex, traceback.format_exc())}}}
+        return ret_req
+
+    def process_running_requests(self):
+        """
+        Process running request
         """
         ret = []
-        while not self.monitor_task_queue.empty():
+        while not self.running_task_queue.empty():
             try:
-                req = self.monitor_task_queue.get()
+                req = self.running_task_queue.get()
                 if req:
-                    self.logger.info("Main thread processing monitor requst: %s" % req)
-                    ret_req = self.process_monitor_request(req)
+                    self.running_processing_size += 1
+                    if req['substatus'] in [RequestStatus.ToCancel, RequestStatus.ToSuspend, RequestStatus.ToResume, RequestStatus.ToExpire]:
+                        self.logger.info("Main thread processing operating requst: %s" % req)
+                        ret_req = self.process_operating_request(req)
+                    # elif req['status'] in [RequestStatus.Transforming, RequestStatus.Cancelling, RequestStatus.Suspending, RequestStatus.Resuming]:
+                    else:
+                        self.logger.info("Main thread processing running requst: %s" % req)
+                        ret_req = self.process_running_request(req)
+                    self.running_processing_size -= 1
+
                     if ret_req:
-                        ret.append(ret_req)
+                        # ret.append(ret_req)
+                        self.running_output_queue.put(ret_req)
             except Exception as ex:
                 self.logger.error(ex)
                 self.logger.error(traceback.format_exc())
         return ret
 
-    def finish_monitor_requests(self):
-        while not self.monitor_output_queue.empty():
-            req = self.monitor_output_queue.get()
-            self.logger.debug("finish_monitor_requests: req: %s" % req)
-            parameter = {'locking': RequestLocking.Idle}
-            for key in ['status', 'errors', 'request_metadata']:
-                if key in req:
-                    parameter[key] = req[key]
-            core_requests.update_request(req['request_id'], parameter)
+    def finish_running_requests(self):
+        while not self.running_output_queue.empty():
+            try:
+                req = self.running_output_queue.get()
+                self.logger.info("finish_running_requests: req: %s" % req)
+                req['parameters']['locking'] = RequestLocking.Idle
+
+                if 'new_transforms' in req:
+                    new_transforms = req['new_transforms']
+                else:
+                    new_transforms = []
+
+                if 'update_transforms' in req:
+                    update_transforms = req['update_transforms']
+                else:
+                    update_transforms = {}
+
+                core_requests.update_request_with_transforms(req['request_id'], req['parameters'],
+                                                             new_transforms=new_transforms,
+                                                             update_transforms=update_transforms)
+
+            except Exception as ex:
+                self.logger.error(ex)
+                self.logger.error(traceback.format_exc())
 
     def clean_locks(self):
         self.logger.info("clean locking")
@@ -344,18 +480,24 @@ class Clerk(BaseAgent):
 
             self.load_plugins()
 
-            task = self.create_task(task_func=self.get_new_requests, task_output_queue=self.new_task_queue, task_args=tuple(), task_kwargs={}, delay_time=10, priority=1)
+            self.add_default_tasks()
+
+            task = self.create_task(task_func=self.get_new_requests, task_output_queue=self.new_task_queue, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
             self.add_task(task)
-            task = self.create_task(task_func=self.process_new_requests, task_output_queue=self.new_output_queue, task_args=tuple(), task_kwargs={}, delay_time=2, priority=1)
-            self.add_task(task)
-            task = self.create_task(task_func=self.finish_new_requests, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=2, priority=1)
+            for _ in range(self.num_threads):
+                # task = self.create_task(task_func=self.process_new_requests, task_output_queue=self.new_output_queue, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
+                task = self.create_task(task_func=self.process_new_requests, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
+                self.add_task(task)
+            task = self.create_task(task_func=self.finish_new_requests, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
             self.add_task(task)
 
-            task = self.create_task(task_func=self.get_monitor_requests, task_output_queue=self.monitor_task_queue, task_args=tuple(), task_kwargs={}, delay_time=10, priority=1)
+            task = self.create_task(task_func=self.get_running_requests, task_output_queue=self.running_task_queue, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
             self.add_task(task)
-            task = self.create_task(task_func=self.process_monitor_requests, task_output_queue=self.monitor_output_queue, task_args=tuple(), task_kwargs={}, delay_time=2, priority=1)
-            self.add_task(task)
-            task = self.create_task(task_func=self.finish_monitor_requests, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=2, priority=1)
+            for _ in range(self.num_threads):
+                # task = self.create_task(task_func=self.process_running_requests, task_output_queue=self.running_output_queue, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
+                task = self.create_task(task_func=self.process_running_requests, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
+                self.add_task(task)
+            task = self.create_task(task_func=self.finish_running_requests, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1, priority=1)
             self.add_task(task)
 
             task = self.create_task(task_func=self.clean_locks, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1800, priority=1)

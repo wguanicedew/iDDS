@@ -12,6 +12,7 @@
 """
 Class of activelearning condor plubin
 """
+import datetime
 import os
 import json
 import traceback
@@ -36,9 +37,16 @@ class HyperParameterOptCondorSubmitter(CondorSubmitter):
         else:
             self.min_unevaluated_points = int(self.min_unevaluated_points)
         if not hasattr(self, 'max_points'):
-            self.max_points = 100
+            self.max_points = 1000000000
         else:
             self.max_points = int(self.max_points)
+
+    def get_max_points(self, transform_metadata):
+        if 'max_points' in transform_metadata:
+            max_points = transform_metadata['max_points']
+        else:
+            max_points = self.max_points
+        return max_points
 
     def get_executable_arguments_for_method(self, transform_metadata, input_json, unevaluated_points):
         method = transform_metadata['method']
@@ -63,10 +71,7 @@ class HyperParameterOptCondorSubmitter(CondorSubmitter):
             else:
                 should_transfer_executable = False
 
-            if 'max_points' in transform_metadata:
-                max_points = transform_metadata['max_points']
-            else:
-                max_points = self.max_points
+            max_points = self.get_max_points(transform_metadata)
             if 'num_points_per_generation' in transform_metadata:
                 num_points = transform_metadata['num_points_per_generation']
             else:
@@ -85,16 +90,23 @@ class HyperParameterOptCondorSubmitter(CondorSubmitter):
         sandbox = None
         if 'sandbox' in transform_metadata:
             sandbox = transform_metadata['sandbox']
-        executable = transform_metadata['executable']
-        arguments = transform_metadata['arguments']
+        executable = transform_metadata['executable'].strip()
+        arguments = transform_metadata['arguments'].strip()
+
+        if executable == 'docker' and sandbox:
+            if 'workdir' in transform_metadata:
+                docker_workdir = transform_metadata['workdir']
+            else:
+                docker_workdir = None
+
+            arg_pre = 'run --rm -v $(pwd):%s %s ' % (docker_workdir, sandbox)
+            arguments = arg_pre + arguments
+            sandbox = None
 
         output_json = None
         if 'output_json' in transform_metadata:
             output_json = transform_metadata['output_json']
-        if 'max_points' in transform_metadata:
-            max_points = transform_metadata['max_points']
-        else:
-            max_points = self.max_points
+        max_points = self.get_max_points(transform_metadata)
         if 'num_points_per_generation' in transform_metadata:
             num_points = transform_metadata['num_points_per_generation']
         else:
@@ -121,22 +133,6 @@ class HyperParameterOptCondorSubmitter(CondorSubmitter):
                 if not content['status'] == ContentStatus.Available:
                     unevaluated_points += 1
 
-            """
-            if self.min_unevaluated_points and unevaluated_points >= self.min_unevaluated_points:
-                # not submit the job
-                processing_metadata = processing['processing_metadata']
-                processing_metadata['unevaluated_points'] = unevaluated_points
-                processing_metadata['not_submit'] = 'unevaluated_points(%s) > min_unevaluated_points(%s)' % (unevaluated_points, self.min_unevaluated_points)
-                self.logger.info("processing_id(%s) not submit currently because unevaluated_points(%s) >= min_unevaluated_points(%s)" % (processing['processing_id'], unevaluated_points, self.min_unevaluated_points))
-                ret = {'processing_id': processing['processing_id'],
-                       'status': ProcessingStatus.New,
-                       'processing_metadata': processing_metadata}
-                return ret
-
-            if 'not_submit' in processing_metadata:
-                del processing_metadata['not_submit']
-            """
-
             job_dir = self.get_job_dir(processing['processing_id'])
             input_json = 'idds_input.json'
             opt_space = None
@@ -160,6 +156,8 @@ class HyperParameterOptCondorSubmitter(CondorSubmitter):
                 processing_metadata['submitter'] = self.name
                 processing_metadata['submit_errors'] = errors
                 processing_metadata['output_json'] = output_json
+                processing_metadata['max_points'] = self.get_max_points(transform['transform_metadata'])
+                # processing_metadata['job_dir'] = job_dir
                 ret = {'processing_id': processing['processing_id'],
                        'status': ProcessingStatus.Submitted,
                        'processing_metadata': processing_metadata}
@@ -171,6 +169,8 @@ class HyperParameterOptCondorSubmitter(CondorSubmitter):
                 processing_metadata['job_id'] = job_id
                 processing_metadata['submitter'] = self.name
                 processing_metadata['output_json'] = output_json
+                processing_metadata['max_points'] = self.get_max_points(transform['transform_metadata'])
+                # processing_metadata['job_dir'] = job_dir
                 if not job_id:
                     processing_metadata['submit_errors'] = outputs
                 else:
@@ -178,6 +178,7 @@ class HyperParameterOptCondorSubmitter(CondorSubmitter):
 
                 ret = {'processing_id': processing['processing_id'],
                        'status': ProcessingStatus.Submitted,
+                       'next_poll_at': datetime.datetime.utcnow() + datetime.timedelta(seconds=self.poll_time_period),
                        'processing_metadata': processing_metadata}
             return ret
         except Exception as ex:

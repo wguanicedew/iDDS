@@ -6,26 +6,32 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2020
 
 
 import datetime
 import logging
+import json
 import os
 import re
 import requests
 import subprocess
 import sys
+import tarfile
+import traceback
 
 from enum import Enum
+from functools import wraps
 
 from idds.common.config import (config_has_section, config_has_option,
                                 config_get, config_get_bool)
-from idds.common.constants import (RequestType, RequestStatus,
+from idds.common.constants import (IDDSEnum, RequestType, RequestStatus,
                                    TransformType, TransformStatus,
                                    CollectionType, CollectionRelationType, CollectionStatus,
                                    ContentType, ContentStatus,
                                    GranularityType, ProcessingStatus)
+from idds.common.dict_class import DictClass
+from idds.common.exceptions import IDDSException
 
 
 # RFC 1123
@@ -329,6 +335,36 @@ def convert_request_type_to_transform_type(request_type):
     return TransformType(request_type)
 
 
+class DictClassEncoder(json.JSONEncoder):
+    def default(self, obj):
+        # print(obj)
+        if isinstance(obj, IDDSEnum) or isinstance(obj, DictClass):
+            return obj.to_dict()
+        elif isinstance(obj, datetime.datetime):
+            return date_to_str(obj)
+        # elif isinstance(obj, (datetime.time, datetime.date)):
+        #     return obj.isoformat()
+        # elif isinstance(obj, datetime.timedelta):
+        #     return obj.days * 24 * 60 * 60 + obj.seconds
+
+        # Let the base class default method raise the TypeError
+        return json.JSONEncoder.default(self, obj)
+
+
+def as_has_dict(dct):
+    if DictClass.is_class(dct):
+        return DictClass.from_dict(dct)
+    return dct
+
+
+def json_dumps(obj, indent=None, sort_keys=False):
+    return json.dumps(obj, indent=indent, sort_keys=sort_keys, cls=DictClassEncoder)
+
+
+def json_loads(obj):
+    return json.loads(obj, object_hook=as_has_dict)
+
+
 def get_parameters_from_string(text):
     """
     Find all strings starting with '%'. For example, for this string below, it should return ['NUM_POINTS', 'IN', 'OUT']
@@ -353,3 +389,65 @@ def replace_parameters_with_values(text, values):
         key1 = '%' + key
         text = re.sub(key1, str(values[key]), text)
     return text
+
+
+def tar_zip_files(output_dir, output_filename, files):
+    output_filename = os.path.join(output_dir, output_filename)
+    with tarfile.open(output_filename, "w:gz") as tar:
+        for file in files:
+            tar.add(file, arcname=os.path.basename(file))
+
+
+def exception_handler(function):
+    @wraps(function)
+    def new_funct(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except IDDSException as ex:
+            logging.error(ex)
+            print(traceback.format_exc())
+            return str(ex)
+        except Exception as ex:
+            logging.error(ex)
+            print(traceback.format_exc())
+            return str(ex)
+    return new_funct
+
+
+def is_sub(a, b):
+    if not a:
+        return True
+
+    for i in a:
+        if i not in b:
+            return False
+    return True
+
+
+def get_proxy_path():
+    try:
+        if 'X509_USER_PROXY' in os.environ:
+            proxy = os.environ['X509_USER_PROXY']
+            if os.access(proxy, os.R_OK):
+                return proxy
+        proxy = '/tmp/x509up_u%s' % os.getuid()
+        if os.access(proxy, os.R_OK):
+            return proxy
+    except Exception:
+        pass
+    return None
+
+
+def get_proxy():
+    try:
+        proxy = get_proxy_path()
+        with open(proxy, 'r') as fp:
+            data = fp.read()
+        return data
+    except Exception:
+        pass
+    return None
+
+
+def is_new_version(version1, version2):
+    return version1 > version2

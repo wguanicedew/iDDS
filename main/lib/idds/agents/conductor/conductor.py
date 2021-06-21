@@ -46,7 +46,10 @@ class Conductor(BaseAgent):
         Get messages
         """
         messages = core_messages.retrieve_messages(status=MessageStatus.New, bulk_size=self.retrieve_bulk_size)
-        self.logger.info("Main thread get %s new messages" % len(messages))
+
+        self.logger.debug("Main thread get %s new messages" % len(messages))
+        if messages:
+            self.logger.info("Main thread get %s new messages" % len(messages))
 
         return messages
 
@@ -81,7 +84,13 @@ class Conductor(BaseAgent):
             self.load_plugins()
 
             self.start_notifier()
+
+            self.add_health_message_task()
+
             while not self.graceful_stop.is_set():
+                # execute timer task
+                self.execute_once()
+
                 try:
                     messages = self.get_messages()
                     for message in messages:

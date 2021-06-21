@@ -215,7 +215,7 @@ def get_session():
 
 def retry_if_db_connection_error(exception):
     """Return True if error in connecting to db."""
-    print(exception)
+    # print(exception)
     if isinstance(exception, OperationalError):
         conn_err_codes = ('2002', '2003', '2006',  # MySQL
                           'ORA-00028',  # Oracle session has been killed
@@ -325,6 +325,10 @@ def transactional_session(function):
     With that decorator it's possible to use the session variable like if a global variable session is declared.
     session is a sqlalchemy session, and you can get one calling get_session().
     '''
+    @retry(retry_on_exception=retry_if_db_connection_error,
+           wait_fixed=0.5,
+           stop_max_attempt_number=2,
+           wrap_exception=False)
     @wraps(function)
     def new_funct(*args, **kwargs):
         if not kwargs.get('session'):

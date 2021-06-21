@@ -25,6 +25,8 @@ class TimerScheduler(threading.Thread):
     def __init__(self, num_threads, logger=None):
         super(TimerScheduler, self).__init__()
         self.num_threads = int(num_threads)
+        if self.num_threads < 1:
+            self.num_threads = 1
         self.graceful_stop = threading.Event()
         self.executors = futures.ThreadPoolExecutor(max_workers=self.num_threads)
 
@@ -80,3 +82,11 @@ class TimerScheduler(threading.Thread):
                     self.graceful_stop.wait(1)
             except Exception as error:
                 self.logger.critical("Caught an exception: %s\n%s" % (str(error), traceback.format_exc()))
+
+    def execute_once(self):
+        try:
+            task = self.get_ready_task()
+            if task:
+                self.executors.submit(self.execute_task, task)
+        except Exception as error:
+            self.logger.critical("Caught an exception: %s\n%s" % (str(error), traceback.format_exc()))

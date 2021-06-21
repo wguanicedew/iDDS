@@ -13,7 +13,6 @@ import glob
 import io
 import os
 import re
-import io
 import sys
 from distutils.sysconfig import get_python_lib
 from setuptools import setup, find_packages, Distribution
@@ -91,6 +90,7 @@ data_files = [
     # config and cron files
     ('etc/idds/', glob.glob('etc/idds/*.template')),
     ('etc/idds/rest', glob.glob('etc/idds/rest/*template')),
+    ('tools/env/', glob.glob('tools/env/*.yml')),
 ]
 scripts = glob.glob('bin/*')
 
