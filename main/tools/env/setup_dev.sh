@@ -8,6 +8,8 @@
 # Authors:
 # - Wen Guan, <wen.guan@cern.ch>, 2019
 
+# export LANG=en_US.UTF-8
+# export LC_ALL=en_US.UTF-8
 
 CurrentDir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ToolsDir="$( dirname "$CurrentDir" )"
@@ -17,11 +19,14 @@ CondaDir=${RootDir}/../.conda/iDDS
 echo 'Root dir: ' $RootDir
 export IDDS_HOME=$RootDir
 
+source /afs/cern.ch/user/w/wguan/workdisk/conda/setup.sh
+
 conda activate $CondaDir
 #export PYTHONPATH=${IDDS_HOME}/lib:$PYTHONPATH
 
 export RUCIO_HOME=$RootDir
-export RUCIO_ACCOUNT=ddmadmin
+#export RUCIO_ACCOUNT=ddmadmin
+export RUCIO_ACCOUNT=wguan
 export X509_USER_PROXY=/tmp/x509up_u23959
-export PYTHONPATH=$PYTHONPATH:/cvmfs/atlas.cern.ch/repo/ATLASLocalRootBase/x86_64/rucio-clients/current/lib/python3.6/site-packages/
+# export PYTHONPATH=$PYTHONPATH:/cvmfs/atlas.cern.ch/repo/ATLASLocalRootBase/x86_64/rucio-clients/current/lib/python3.6/site-packages/
 

@@ -13,6 +13,7 @@
 operations related to Messages.
 """
 
+import datetime
 import re
 import copy
 
@@ -56,6 +57,9 @@ def add_message(msg_type, status, source, request_id, workload_id, transform_id,
                     new_num_contents = len(chunk)
                     num_contents_list.append(new_num_contents)
                     msg_content_list.append(new_msg_content)
+            else:
+                num_contents_list.append(num_contents)
+                msg_content_list.append(msg_content)
         else:
             num_contents_list.append(num_contents)
             msg_content_list.append(msg_content)
@@ -81,9 +85,11 @@ def add_message(msg_type, status, source, request_id, workload_id, transform_id,
 
 
 @transactional_session
-def add_messages(messages, session=None):
+def add_messages(messages, bulk_size=1000, session=None):
     try:
-        session.bulk_insert_mappings(models.Message, messages)
+        # session.bulk_insert_mappings(models.Message, messages)
+        for msg in messages:
+            add_message(**msg, bulk_size=bulk_size, session=session)
     except TypeError as e:
         raise exceptions.DatabaseException('Invalid JSON for msg_content: %s' % str(e))
     except DatabaseError as e:
@@ -95,7 +101,7 @@ def add_messages(messages, session=None):
 
 
 @transactional_session
-def update_messages(messages, session=None):
+def update_messages(messages, bulk_size=1000, session=None):
     try:
         session.bulk_update_mappings(models.Message, messages)
     except TypeError as e:
@@ -111,7 +117,8 @@ def update_messages(messages, session=None):
 @read_session
 def retrieve_messages(bulk_size=1000, msg_type=None, status=None, source=None,
                       destination=None, request_id=None, workload_id=None,
-                      transform_id=None, processing_id=None, session=None):
+                      transform_id=None, processing_id=None,
+                      retries=None, delay=None, session=None):
     """
     Retrieve up to $bulk messages.
 
@@ -125,7 +132,22 @@ def retrieve_messages(bulk_size=1000, msg_type=None, status=None, source=None,
     """
     messages = []
     try:
+        if destination is not None:
+            if not isinstance(destination, (list, tuple)):
+                destination = [destination]
+            if len(destination) == 1:
+                destination = [destination[0], destination[0]]
+
         query = session.query(models.Message)
+        if request_id is not None:
+            query = query.with_hint(models.Message, "INDEX(MESSAGES MESSAGES_TYPE_ST_IDX)", 'oracle')
+        elif transform_id:
+            query = query.with_hint(models.Message, "INDEX(MESSAGES MESSAGES_TYPE_ST_TF_IDX)", 'oracle')
+        elif processing_id is not None:
+            query = query.with_hint(models.Message, "INDEX(MESSAGES MESSAGES_TYPE_ST_PR_IDX)", 'oracle')
+        else:
+            query = query.with_hint(models.Message, "INDEX(MESSAGES MESSAGES_TYPE_ST_IDX)", 'oracle')
+
         if msg_type is not None:
             query = query.filter_by(msg_type=msg_type)
         if status is not None:
@@ -133,7 +155,7 @@ def retrieve_messages(bulk_size=1000, msg_type=None, status=None, source=None,
         if source is not None:
             query = query.filter_by(source=source)
         if destination is not None:
-            query = query.filter_by(destination=destination)
+            query = query.filter(models.Message.destination.in_(destination))
         if request_id is not None:
             query = query.filter_by(request_id=request_id)
         if workload_id is not None:
@@ -142,6 +164,10 @@ def retrieve_messages(bulk_size=1000, msg_type=None, status=None, source=None,
             query = query.filter_by(transform_id=transform_id)
         if processing_id is not None:
             query = query.filter_by(processing_id=processing_id)
+        if retries:
+            query = query.filter_by(retries=retries)
+        if delay:
+            query = query.filter(models.Message.updated_at < datetime.datetime.utcnow() - datetime.timedelta(seconds=delay))
 
         if bulk_size:
             query = query.order_by(models.Message.created_at).limit(bulk_size)

@@ -22,7 +22,7 @@ try:
 except ImportError:
     from urllib.parse import quote
 
-from pandatools import Client
+from pandaclient import Client
 
 # from idds.client.client import Client
 from idds.client.clientmanager import ClientManager
@@ -32,12 +32,12 @@ from idds.common.utils import get_rest_host, run_command
 # from idds.tests.common import get_example_real_tape_stagein_request
 # from idds.tests.common import get_example_prodsys2_tape_stagein_request
 
-# from idds.workflow.work import Work, Parameter, WorkStatus
-from idds.workflow.workflow import Condition, Workflow
-# from idds.workflow.workflow import Workflow
-# from idds.atlas.workflow.atlasstageinwork import ATLASStageinWork
-from idds.atlas.workflow.atlaspandawork import ATLASPandaWork
-from idds.atlas.workflow.atlasactuatorwork import ATLASActuatorWork
+# from idds.workflowv2.work import Work, Parameter, WorkStatus
+from idds.workflowv2.workflow import Condition, Workflow
+# from idds.workflowv2.workflow import Workflow
+# from idds.atlas.workflowv2.atlasstageinwork import ATLASStageinWork
+from idds.atlas.workflowv2.atlaspandawork import ATLASPandaWork
+from idds.atlas.workflowv2.atlasactuatorwork import ATLASActuatorWork
 
 
 def get_task_id(output, error):
@@ -120,7 +120,7 @@ def test_panda_work():
     # print('output_collections: %s' % str(test_work.get_output_collections()))
     # print(json_dumps(test_work, sort_keys=True, indent=4))
 
-    # from pandatools import Client
+    # from pandaclient import Client
     # Client.getJediTaskDetails(taskDict,fullFlag,withTaskInfo,verbose=False)
     # ret = Client.getJediTaskDetails({'jediTaskID': panda_task_id},False,True)
     # print(ret)

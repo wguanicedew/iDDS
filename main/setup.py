@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2022
 
 
 import glob
@@ -103,7 +103,7 @@ install_bin_path = get_python_bin_path()
 install_home_path = get_python_home()
 install_data_path = get_data_path()
 
-rest_conf_files = ['etc/idds/rest/httpd-idds-443-py36-cc7.conf.template']
+rest_conf_files = ['etc/idds/rest/httpd-idds-443-py39-cc7.conf.template']
 replace_python_path(rest_conf_files, install_lib_path, install_bin_path, install_home_path)
 wsgi_file = 'bin/idds.wsgi.template'
 replace_data_path(wsgi_file, install_data_path)
@@ -117,9 +117,19 @@ extras_requires = dict(mysql=['mysqlclient'])
 data_files = [
     # config and cron files
     ('etc/idds/', glob.glob('etc/idds/*.template')),
-    ('etc/idds/rest', glob.glob('etc/idds/rest/*template')),
-    ('tools/env/', glob.glob('tools/env/*.yml')),
+    ('etc/idds/rest', glob.glob('etc/idds/rest/*')),
+    ('etc/idds/auth', glob.glob('etc/idds/auth/*template')),
+    ('etc/idds/website', glob.glob('etc/idds/website/*')),
+    ('etc/idds/supervisord.d', glob.glob('etc/idds/supervisord.d/*')),
+    ('etc/idds/condor/client', glob.glob('etc/idds/condor/client/*')),
+    ('etc/idds/condor/server', glob.glob('etc/idds/condor/server/*')),
+    ('etc/condor/client', glob.glob('etc/condor/client/*')),
+    ('etc/condor/server', glob.glob('etc/condor/server/*')),
+    ('etc/sql', glob.glob('etc/sql/*')),
+    ('config_default/', glob.glob('config_default/*')),
+    ('tools/env/', glob.glob('tools/env/*')),
 ]
+
 scripts = glob.glob('bin/*')
 
 setup(

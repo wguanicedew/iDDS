@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2022
 
 
 """
@@ -25,7 +25,7 @@ class RequestClient(BaseRestClient):
 
     REQUEST_BASEURL = 'request'
 
-    def __init__(self, host=None, client_proxy=None, timeout=None):
+    def __init__(self, host=None, auth=None, timeout=None):
         """
         Constructor of the BaseRestClient.
 
@@ -33,7 +33,7 @@ class RequestClient(BaseRestClient):
         :param client_proxy: the client certificate proxy.
         :param timeout: timeout in seconds.
         """
-        super(RequestClient, self).__init__(host=host, client_proxy=client_proxy, timeout=timeout)
+        super(RequestClient, self).__init__(host=host, auth=auth, timeout=timeout)
 
     def add_request(self, **kwargs):
         """
@@ -80,7 +80,26 @@ class RequestClient(BaseRestClient):
         r = self.get_request_response(url, type='PUT', data=data)
         return r
 
-    def get_requests(self, request_id=None, workload_id=None, with_detail=False, with_metadata=False):
+    def update_build_request(self, request_id, signature, workflow):
+        """
+        Update Build Request to the Head service.
+
+        :param request_id: the request.
+        :param signature: the signature of the request.
+        :param workflow: the workflow of the request.
+
+        :raise exceptions if it's not updated successfully.
+        """
+        path = self.REQUEST_BASEURL
+        path += "/build"
+        url = self.build_url(self.host, path=os.path.join(path, str(request_id)))
+
+        data = {'signature': signature,
+                'workflow': workflow}
+        r = self.get_request_response(url, type='POST', data=data)
+        return r
+
+    def get_requests(self, request_id=None, workload_id=None, with_detail=False, with_metadata=False, with_transform=False, with_processing=False):
         """
         Get request from the Head service.
 
@@ -94,7 +113,7 @@ class RequestClient(BaseRestClient):
             request_id = 'null'
         if workload_id is None:
             workload_id = 'null'
-        url = self.build_url(self.host, path=os.path.join(path, str(request_id), str(workload_id), str(with_detail), str(with_metadata)))
+        url = self.build_url(self.host, path=os.path.join(path, str(request_id), str(workload_id), str(with_detail), str(with_metadata), str(with_transform), str(with_processing)))
 
         requests = self.get_request_response(url, type='GET')
 
@@ -105,3 +124,83 @@ class RequestClient(BaseRestClient):
         #         request['status'] = RequestStatus(request['status'])
 
         return requests
+
+    def get_request_id_by_name(self, name):
+        """
+        Get request id by name.
+
+        :param name: the request name.
+
+        :returns {name:id} dict.
+        """
+        path = self.REQUEST_BASEURL
+        path += "/name"
+
+        url = self.build_url(self.host, path=os.path.join(path, name))
+        r = self.get_request_response(url, type='GET', data=None)
+        return r
+
+    def abort_request(self, request_id, workload_id=None):
+        """
+        Abort Request.
+
+        :param request_id: the request.
+        :param kwargs: other attributes of the request.
+
+        :raise exceptions if it's not updated successfully.
+        """
+        path = self.REQUEST_BASEURL
+        path += "/abort"
+
+        if request_id is None:
+            request_id = 'null'
+        if workload_id is None:
+            workload_id = 'null'
+
+        url = self.build_url(self.host, path=os.path.join(path, str(request_id), str(workload_id)))
+        r = self.get_request_response(url, type='PUT', data=None)
+        return r
+
+    def abort_request_task(self, request_id, workload_id=None, task_id=None):
+        """
+        Abort Request task.
+
+        :param request_id: the request.
+        :param kwargs: other attributes of the request.
+
+        :raise exceptions if it's not updated successfully.
+        """
+        path = self.REQUEST_BASEURL
+        path += "/abort"
+
+        if request_id is None:
+            request_id = 'null'
+        if workload_id is None:
+            workload_id = 'null'
+        if task_id is None:
+            task_id = 'null'
+
+        url = self.build_url(self.host, path=os.path.join(path, str(request_id), str(workload_id), str(task_id)))
+        r = self.get_request_response(url, type='PUT', data=None)
+        return r
+
+    def retry_request(self, request_id, workload_id=None):
+        """
+        Retry Request.
+
+        :param request_id: the request.
+        :param kwargs: other attributes of the request.
+
+        :raise exceptions if it's not updated successfully.
+        """
+        path = self.REQUEST_BASEURL
+        path += "/retry"
+
+        if request_id is None:
+            request_id = 'null'
+        if workload_id is None:
+            workload_id = 'null'
+
+        url = self.build_url(self.host, path=os.path.join(path, str(request_id), str(workload_id)))
+        r = self.get_request_response(url, type='PUT', data=None)
+        return r

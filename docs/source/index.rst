@@ -32,7 +32,7 @@ For documentation specific to any of these three, please see the subsequent sect
    general/v2/architecture
    general/v2/workflow
    general/v2/dag
-   general/v1/index
+   general/v2/authorization
 
 Use Cases
 =========
@@ -55,8 +55,20 @@ User Documentation
 
    users/installing_client
    users/cli_examples
+   users/condition_examples
+   users/workflow_examples
+   users/monitorapi_examples
    users/admin_guides
    users/contributing
+
+DOMA User Documentation
+=========================
+
+.. toctree::
+      :maxdepth: 1
+
+   domausers/installing_client
+   domausers/cli_examples
 
 Source Codes
 =============
@@ -64,7 +76,7 @@ Source Codes
 .. toctree::
    :maxdepth: 1
 
-   codes/libraries
+   source_codes
 
 Indices and tables
 ==================

@@ -25,7 +25,7 @@ class CatalogClient(BaseRestClient):
 
     CATALOG_BASEURL = 'catalog'
 
-    def __init__(self, host=None, client_proxy=None, timeout=None):
+    def __init__(self, host=None, auth=None, timeout=None):
         """
         Constructor of the BaseRestClient.
 
@@ -33,7 +33,7 @@ class CatalogClient(BaseRestClient):
         :param client_proxy: the client certificate proxy.
         :param timeout: timeout in seconds.
         """
-        super(CatalogClient, self).__init__(host=host, client_proxy=client_proxy, timeout=timeout)
+        super(CatalogClient, self).__init__(host=host, auth=auth, timeout=timeout)
 
     def get_collections(self, scope=None, name=None, request_id=None, workload_id=None, relation_type=None):
         """
@@ -172,3 +172,27 @@ class CatalogClient(BaseRestClient):
 
         r = self.get_request_response(url, type='POST', data=contents)
         return r
+
+    def get_contents_output_ext(self, request_id=None, workload_id=None, transform_id=None, group_by_jedi_task_id=False):
+        """
+        Get output extension contents from the Head service.
+
+        :param request_id: the request id.
+        :param workload_id: the workload id.
+        :param transform_id: the transform id.
+
+        :raise exceptions if it's not got successfully.
+        """
+        path = os.path.join(self.CATALOG_BASEURL, 'contents_output_ext')
+        if request_id is None:
+            request_id = 'null'
+        if workload_id is None:
+            workload_id = 'null'
+        if transform_id is None:
+            transform_id = 'null'
+
+        url = self.build_url(self.host, path=os.path.join(path, str(request_id), str(workload_id),
+                                                          str(transform_id), str(group_by_jedi_task_id)))
+
+        contents = self.get_request_response(url, type='GET')
+        return contents

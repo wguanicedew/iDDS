@@ -36,6 +36,8 @@ class GUID(TypeDecorator):
     """
     impl = CHAR
 
+    cache_ok = True
+
     def generate_uuid(self):
         return str(uuid.uuid4()).replace('-', '').lower()
 
@@ -84,6 +86,8 @@ class JSON(TypeDecorator):
 
     impl = types.JSON
 
+    cache_ok = True
+
     def load_dialect_impl(self, dialect):
         if dialect.name == 'postgresql':
             return dialect.type_descriptor(JSONB())
@@ -126,16 +130,22 @@ class JSONString(TypeDecorator):
 
     impl = types.JSON
 
+    cache_ok = True
+
+    def __init__(self, length=1024, *args, **kwargs):
+        super(JSONString, self).__init__(*args, **kwargs)
+        self._length = length
+
     def load_dialect_impl(self, dialect):
         if dialect.name == 'postgresql':
-            return dialect.type_descriptor(JSONB())
+            return dialect.type_descriptor(String(self._length))
         elif dialect.name == 'mysql':
-            return dialect.type_descriptor(String(255))
+            return dialect.type_descriptor(String(self._length))
             # return dialect.type_descriptor(types.JSON())
         elif dialect.name == 'oracle':
-            return dialect.type_descriptor(String(255))
+            return dialect.type_descriptor(String(self._length))
         else:
-            return dialect.type_descriptor(String(255))
+            return dialect.type_descriptor(String(self._length))
 
     def process_bind_param(self, value, dialect):
         if value is None:
@@ -166,6 +176,7 @@ class EnumWithValue(TypeDecorator):
     The default would have stored the enum's *name* (ie the string).
     """
     impl = Integer
+    cache_ok = True
 
     def __init__(self, enumtype, *args, **kwargs):
         super(EnumWithValue, self).__init__(*args, **kwargs)

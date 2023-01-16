@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2020
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2022
 
 
 """
@@ -27,9 +27,12 @@ from idds.orm.base.session import read_session, transactional_session
 from idds.orm.base import models
 
 
-def create_request(scope=None, name=None, requester=None, request_type=None, transform_tag=None,
+def create_request(scope=None, name=None, requester=None, request_type=None,
+                   username=None, userdn=None, transform_tag=None,
                    status=RequestStatus.New, locking=RequestLocking.Idle, priority=0,
                    lifetime=None, workload_id=None, request_metadata=None,
+                   new_poll_period=1, update_poll_period=10,
+                   new_retries=0, update_retries=0, max_new_retries=3, max_update_retries=0,
                    processing_metadata=None):
     """
     Create a request.
@@ -74,17 +77,29 @@ def create_request(scope=None, name=None, requester=None, request_type=None, tra
         expired_at = None
 
     new_request = models.Request(scope=scope, name=name, requester=requester, request_type=request_type,
+                                 username=username, userdn=userdn,
                                  transform_tag=transform_tag, status=status, locking=locking,
                                  priority=priority, workload_id=workload_id,
                                  expired_at=expired_at,
+                                 new_retries=new_retries, update_retries=update_retries,
+                                 max_new_retries=max_new_retries, max_update_retries=max_update_retries,
                                  request_metadata=request_metadata, processing_metadata=processing_metadata)
+    if new_poll_period:
+        new_poll_period = datetime.timedelta(seconds=new_poll_period)
+        new_request.new_poll_period = new_poll_period
+    if update_poll_period:
+        update_poll_period = datetime.timedelta(seconds=update_poll_period)
+        new_request.update_poll_period = update_poll_period
     return new_request
 
 
 @transactional_session
-def add_request(scope=None, name=None, requester=None, request_type=None, transform_tag=None,
+def add_request(scope=None, name=None, requester=None, request_type=None,
+                username=None, userdn=None, transform_tag=None,
                 status=RequestStatus.New, locking=RequestLocking.Idle, priority=0,
                 lifetime=None, workload_id=None, request_metadata=None,
+                new_poll_period=1, update_poll_period=10,
+                new_retries=0, update_retries=0, max_new_retries=3, max_update_retries=0,
                 processing_metadata=None, session=None):
     """
     Add a request.
@@ -110,8 +125,13 @@ def add_request(scope=None, name=None, requester=None, request_type=None, transf
 
     try:
         new_request = create_request(scope=scope, name=name, requester=requester, request_type=request_type,
+                                     username=username, userdn=userdn,
                                      transform_tag=transform_tag, status=status, locking=locking,
                                      priority=priority, workload_id=workload_id, lifetime=lifetime,
+                                     new_poll_period=new_poll_period,
+                                     update_poll_period=update_poll_period,
+                                     new_retries=new_retries, update_retries=update_retries,
+                                     max_new_retries=max_new_retries, max_update_retries=max_update_retries,
                                      request_metadata=request_metadata, processing_metadata=processing_metadata)
         new_request.save(session=session)
         request_id = new_request.request_id
@@ -150,6 +170,32 @@ def get_request_ids_by_workload_id(workload_id, session=None):
         return ret_ids
     except sqlalchemy.orm.exc.NoResultFound as error:
         raise exceptions.NoObject('request with workload_id:%s cannot be found: %s' % (workload_id, error))
+
+
+@read_session
+def get_request_ids_by_name(name, session=None):
+    """
+    Get request ids or raise a NoObject exception.
+
+    :param name: name of the request.
+    :param session: The database session in use.
+
+    :raises NoObject: If no request is founded.
+
+    :returns: Request {name:id} dict.
+    """
+    try:
+        query = session.query(models.Request.request_id, models.Request.name)\
+                       .with_hint(models.Request, "INDEX(REQUESTS REQUESTS_SCOPE_NAME_IDX)")\
+                       .filter(models.Request.name.like(name.replace('*', '%')))
+        tmp = query.all()
+        ret_ids = {}
+        if tmp:
+            for req in tmp:
+                ret_ids[req[1]] = req[0]
+        return ret_ids
+    except sqlalchemy.orm.exc.NoResultFound as error:
+        raise exceptions.NoObject('request with name:%s cannot be found: %s' % (name, error))
 
 
 @read_session
@@ -202,7 +248,48 @@ def get_request(request_id, to_json=False, session=None):
 
 
 @read_session
-def get_requests(request_id=None, workload_id=None, with_detail=False, with_metadata=False, with_processing=False, to_json=False, session=None):
+def get_request_by_id_status(request_id, status=None, locking=False, session=None):
+    """
+    Get a request or raise a NoObject exception.
+
+    :param request_id: The id of the request.
+    :param status: request status.
+    :param locking: the locking status.
+
+    :param session: The database session in use.
+
+    :raises NoObject: If no request is founded.
+
+    :returns: Request.
+    """
+
+    try:
+        query = session.query(models.Request).with_hint(models.Request, "INDEX(REQUESTS REQUESTS_PK)", 'oracle')\
+                                             .filter(models.Request.request_id == request_id)
+
+        if status:
+            if not isinstance(status, (list, tuple)):
+                status = [status]
+            if len(status) == 1:
+                status = [status[0], status[0]]
+            query = query.filter(models.Request.status.in_(status))
+
+        if locking:
+            query = query.filter(models.Request.locking == RequestLocking.Idle)
+            query = query.with_for_update(skip_locked=True)
+
+        ret = query.first()
+        if not ret:
+            return None
+        else:
+            return ret.to_dict()
+    except sqlalchemy.orm.exc.NoResultFound as error:
+        raise exceptions.NoObject('request request_id: %s cannot be found: %s' % (request_id, error))
+
+
+@read_session
+def get_requests(request_id=None, workload_id=None, with_detail=False, with_metadata=False,
+                 with_request=False, with_transform=False, with_processing=False, to_json=False, session=None):
     """
     Get a request or raise a NoObject exception.
 
@@ -216,7 +303,7 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
     :returns: Request.
     """
     try:
-        if not with_detail and not with_processing:
+        if with_request or not (with_transform or with_processing or with_detail or with_metadata):
             if with_metadata:
                 query = session.query(models.Request)\
                                .with_hint(models.Request, "INDEX(REQUESTS REQUESTS_SCOPE_NAME_IDX)", 'oracle')
@@ -242,6 +329,8 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                                       models.Request.name,
                                       models.Request.requester,
                                       models.Request.request_type,
+                                      models.Request.username,
+                                      models.Request.userdn,
                                       models.Request.transform_tag,
                                       models.Request.workload_id,
                                       models.Request.priority,
@@ -268,49 +357,131 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                         t2 = dict(zip(t.keys(), t))
                         rets.append(t2)
                 return rets
+        elif with_transform:
+            subquery1 = session.query(models.Collection.coll_id, models.Collection.transform_id,
+                                      models.Collection.scope.label("input_coll_scope"),
+                                      models.Collection.name.label("input_coll_name"),
+                                      models.Collection.status.label("input_coll_status"),
+                                      models.Collection.bytes.label("input_coll_bytes"),
+                                      models.Collection.total_files.label("input_total_files"),
+                                      models.Collection.processed_files.label("input_processed_files"),
+                                      models.Collection.new_files.label("input_new_files"),
+                                      models.Collection.failed_files.label("input_failed_files"),
+                                      models.Collection.missing_files.label("input_missing_files"),
+                                      models.Collection.processing_files.label("input_processing_files")).filter(models.Collection.relation_type == 0)
+            subquery1 = subquery1.subquery()
+
+            subquery2 = session.query(models.Collection.coll_id, models.Collection.transform_id,
+                                      models.Collection.scope.label("output_coll_scope"),
+                                      models.Collection.name.label("output_coll_name"),
+                                      models.Collection.status.label("output_coll_status"),
+                                      models.Collection.bytes.label("output_coll_bytes"),
+                                      models.Collection.total_files.label("output_total_files"),
+                                      models.Collection.processed_files.label("output_processed_files"),
+                                      models.Collection.new_files.label("output_new_files"),
+                                      models.Collection.failed_files.label("output_failed_files"),
+                                      models.Collection.missing_files.label("output_missing_files"),
+                                      models.Collection.processing_files.label("output_processing_files")).filter(models.Collection.relation_type == 1)
+            subquery2 = subquery2.subquery()
+            if True:
+                query = session.query(models.Request.request_id,
+                                      models.Request.scope,
+                                      models.Request.name,
+                                      models.Request.requester,
+                                      models.Request.request_type,
+                                      models.Request.username,
+                                      models.Request.userdn,
+                                      models.Request.transform_tag,
+                                      models.Request.workload_id,
+                                      models.Request.priority,
+                                      models.Request.status,
+                                      models.Request.substatus,
+                                      models.Request.locking,
+                                      models.Request.created_at,
+                                      models.Request.updated_at,
+                                      models.Request.next_poll_at,
+                                      models.Request.accessed_at,
+                                      models.Request.expired_at,
+                                      models.Request.errors,
+                                      models.Transform.transform_id,
+                                      models.Transform.transform_type,
+                                      models.Transform.workload_id.label("transform_workload_id"),
+                                      models.Transform.status.label("transform_status"),
+                                      models.Transform.created_at.label("transform_created_at"),
+                                      models.Transform.updated_at.label("transform_updated_at"),
+                                      models.Transform.finished_at.label("transform_finished_at"),
+                                      subquery1.c.input_coll_scope, subquery1.c.input_coll_name,
+                                      subquery1.c.input_coll_status, subquery1.c.input_coll_bytes,
+                                      subquery1.c.input_total_files,
+                                      subquery1.c.input_processed_files,
+                                      subquery1.c.input_processing_files,
+                                      subquery1.c.input_new_files,
+                                      subquery1.c.input_failed_files,
+                                      subquery1.c.input_missing_files,
+                                      subquery2.c.output_coll_scope, subquery2.c.output_coll_name,
+                                      subquery2.c.output_coll_status, subquery2.c.output_coll_bytes,
+                                      subquery2.c.output_total_files,
+                                      subquery2.c.output_processed_files,
+                                      subquery2.c.output_processing_files,
+                                      subquery2.c.output_new_files,
+                                      subquery2.c.output_failed_files,
+                                      subquery2.c.output_missing_files)
+
+            if request_id:
+                query = query.filter(models.Request.request_id == request_id)
+            if workload_id:
+                query = query.filter(models.Request.workload_id == workload_id)
+
+            query = query.outerjoin(models.Transform, and_(models.Request.request_id == models.Transform.request_id))
+            query = query.outerjoin(subquery1, and_(subquery1.c.transform_id == models.Transform.transform_id))
+            query = query.outerjoin(subquery2, and_(subquery2.c.transform_id == models.Transform.transform_id))
+            query = query.order_by(asc(models.Request.request_id))
+
+            tmp = query.all()
+            rets = []
+            if tmp:
+                for t in tmp:
+                    # t2 = dict(t)
+                    t2 = dict(zip(t.keys(), t))
+
+                    if 'request_metadata' in t2 and t2['request_metadata']:
+                        if 'workflow' in t2['request_metadata']:
+                            workflow = t2['request_metadata']['workflow']
+                            workflow_data = None
+                            if 'processing_metadata' in t2 and t2['processing_metadata'] and 'workflow_data' in t2['processing_metadata']:
+                                workflow_data = t2['processing_metadata']['workflow_data']
+                            if workflow is not None and workflow_data is not None:
+                                workflow.metadata = workflow_data
+                                t2['request_metadata']['workflow'] = workflow
+                        if 'build_workflow' in t2['request_metadata']:
+                            build_workflow = t2['request_metadata']['build_workflow']
+                            build_workflow_data = None
+                            if 'processing_metadata' in t2 and t2['processing_metadata'] and 'build_workflow_data' in t2['processing_metadata']:
+                                build_workflow_data = t2['processing_metadata']['build_workflow_data']
+                            if build_workflow is not None and build_workflow_data is not None:
+                                build_workflow.metadata = build_workflow_data
+                                t2['request_metadata']['build_workflow'] = build_workflow
+
+                    rets.append(t2)
+            return rets
         elif with_processing:
             subquery = session.query(models.Processing.processing_id,
                                      models.Processing.transform_id,
+                                     models.Processing.workload_id,
                                      models.Processing.status.label("processing_status"),
                                      models.Processing.created_at.label("processing_created_at"),
                                      models.Processing.updated_at.label("processing_updated_at"),
                                      models.Processing.finished_at.label("processing_finished_at"))
             subquery = subquery.subquery()
 
-            if with_metadata:
+            if True:
                 query = session.query(models.Request.request_id,
                                       models.Request.scope,
                                       models.Request.name,
                                       models.Request.requester,
                                       models.Request.request_type,
-                                      models.Request.transform_tag,
-                                      models.Request.workload_id,
-                                      models.Request.priority,
-                                      models.Request.status,
-                                      models.Request.substatus,
-                                      models.Request.locking,
-                                      models.Request.created_at,
-                                      models.Request.updated_at,
-                                      models.Request.next_poll_at,
-                                      models.Request.accessed_at,
-                                      models.Request.expired_at,
-                                      models.Request.errors,
-                                      models.Request._request_metadata.label('request_metadata'),
-                                      models.Request._processing_metadata.label('processing_metadata'),
-                                      models.Transform.transform_id,
-                                      models.Transform.workload_id.label("transform_workload_id"),
-                                      models.Transform.status.label("transform_status"),
-                                      subquery.c.processing_id,
-                                      subquery.c.processing_status,
-                                      subquery.c.processing_created_at,
-                                      subquery.c.processing_updated_at,
-                                      subquery.c.processing_finished_at)
-            else:
-                query = session.query(models.Request.request_id,
-                                      models.Request.scope,
-                                      models.Request.name,
-                                      models.Request.requester,
-                                      models.Request.request_type,
+                                      models.Request.username,
+                                      models.Request.userdn,
                                       models.Request.transform_tag,
                                       models.Request.workload_id,
                                       models.Request.priority,
@@ -327,6 +498,7 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                                       models.Transform.workload_id.label("transform_workload_id"),
                                       models.Transform.status.label("transform_status"),
                                       subquery.c.processing_id,
+                                      subquery.c.workload_id.label("processing_workload_id"),
                                       subquery.c.processing_status,
                                       subquery.c.processing_created_at,
                                       subquery.c.processing_updated_at,
@@ -348,18 +520,27 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                     # t2 = dict(t)
                     t2 = dict(zip(t.keys(), t))
 
-                    if 'request_metadata' in t2 and t2['request_metadata'] and 'workflow' in t2['request_metadata']:
-                        workflow = t2['request_metadata']['workflow']
-                        workflow_data = None
-                        if 'processing_metadata' in t2 and t2['processing_metadata'] and 'workflow_data' in t2['processing_metadata']:
-                            workflow_data = t2['processing_metadata']['workflow_data']
-                        if workflow is not None and workflow_data is not None:
-                            workflow.metadata = workflow_data
-                            t2['request_metadata']['workflow'] = workflow
+                    if 'request_metadata' in t2 and t2['request_metadata']:
+                        if 'workflow' in t2['request_metadata']:
+                            workflow = t2['request_metadata']['workflow']
+                            workflow_data = None
+                            if 'processing_metadata' in t2 and t2['processing_metadata'] and 'workflow_data' in t2['processing_metadata']:
+                                workflow_data = t2['processing_metadata']['workflow_data']
+                            if workflow is not None and workflow_data is not None:
+                                workflow.metadata = workflow_data
+                                t2['request_metadata']['workflow'] = workflow
+                        if 'build_workflow' in t2['request_metadata']:
+                            build_workflow = t2['request_metadata']['build_workflow']
+                            build_workflow_data = None
+                            if 'processing_metadata' in t2 and t2['processing_metadata'] and 'build_workflow_data' in t2['processing_metadata']:
+                                build_workflow_data = t2['processing_metadata']['build_workflow_data']
+                            if build_workflow is not None and build_workflow_data is not None:
+                                build_workflow.metadata = build_workflow_data
+                                t2['request_metadata']['build_workflow'] = build_workflow
 
                     rets.append(t2)
             return rets
-        elif with_detail:
+        elif with_detail or with_metadata:
             subquery1 = session.query(models.Collection.coll_id, models.Collection.transform_id,
                                       models.Collection.scope.label("input_coll_scope"),
                                       models.Collection.name.label("input_coll_name"),
@@ -367,6 +548,9 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                                       models.Collection.bytes.label("input_coll_bytes"),
                                       models.Collection.total_files.label("input_total_files"),
                                       models.Collection.processed_files.label("input_processed_files"),
+                                      models.Collection.new_files.label("input_new_files"),
+                                      models.Collection.failed_files.label("input_failed_files"),
+                                      models.Collection.missing_files.label("input_missing_files"),
                                       models.Collection.processing_files.label("input_processing_files")).filter(models.Collection.relation_type == 0)
             subquery1 = subquery1.subquery()
 
@@ -377,6 +561,9 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                                       models.Collection.bytes.label("output_coll_bytes"),
                                       models.Collection.total_files.label("output_total_files"),
                                       models.Collection.processed_files.label("output_processed_files"),
+                                      models.Collection.new_files.label("output_new_files"),
+                                      models.Collection.failed_files.label("output_failed_files"),
+                                      models.Collection.missing_files.label("output_missing_files"),
                                       models.Collection.processing_files.label("output_processing_files")).filter(models.Collection.relation_type == 1)
             subquery2 = subquery2.subquery()
 
@@ -386,6 +573,8 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                                       models.Request.name,
                                       models.Request.requester,
                                       models.Request.request_type,
+                                      models.Request.username,
+                                      models.Request.userdn,
                                       models.Request.transform_tag,
                                       models.Request.workload_id,
                                       models.Request.priority,
@@ -402,6 +591,7 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                                       models.Request._processing_metadata.label('processing_metadata'),
                                       models.Transform.transform_id,
                                       models.Transform.transform_type,
+                                      models.Transform.name.label("transform_name"),
                                       models.Transform.workload_id.label("transform_workload_id"),
                                       models.Transform.status.label("transform_status"),
                                       models.Transform.created_at.label("transform_created_at"),
@@ -412,17 +602,25 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                                       subquery1.c.input_total_files,
                                       subquery1.c.input_processed_files,
                                       subquery1.c.input_processing_files,
+                                      subquery1.c.input_new_files,
+                                      subquery1.c.input_failed_files,
+                                      subquery1.c.input_missing_files,
                                       subquery2.c.output_coll_scope, subquery2.c.output_coll_name,
                                       subquery2.c.output_coll_status, subquery2.c.output_coll_bytes,
                                       subquery2.c.output_total_files,
                                       subquery2.c.output_processed_files,
-                                      subquery2.c.output_processing_files)
+                                      subquery2.c.output_processing_files,
+                                      subquery2.c.output_new_files,
+                                      subquery2.c.output_failed_files,
+                                      subquery2.c.output_missing_files,)
             else:
                 query = session.query(models.Request.request_id,
                                       models.Request.scope,
                                       models.Request.name,
                                       models.Request.requester,
                                       models.Request.request_type,
+                                      models.Request.username,
+                                      models.Request.userdn,
                                       models.Request.transform_tag,
                                       models.Request.workload_id,
                                       models.Request.priority,
@@ -437,6 +635,7 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                                       models.Request.errors,
                                       models.Transform.transform_id,
                                       models.Transform.transform_type,
+                                      models.Transform.name.label("transform_name"),
                                       models.Transform.workload_id.label("transform_workload_id"),
                                       models.Transform.status.label("transform_status"),
                                       models.Transform.created_at.label("transform_created_at"),
@@ -447,11 +646,17 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                                       subquery1.c.input_total_files,
                                       subquery1.c.input_processed_files,
                                       subquery1.c.input_processing_files,
+                                      subquery1.c.input_new_files,
+                                      subquery1.c.input_failed_files,
+                                      subquery1.c.input_missing_files,
                                       subquery2.c.output_coll_scope, subquery2.c.output_coll_name,
                                       subquery2.c.output_coll_status, subquery2.c.output_coll_bytes,
                                       subquery2.c.output_total_files,
                                       subquery2.c.output_processed_files,
-                                      subquery2.c.output_processing_files)
+                                      subquery2.c.output_processing_files,
+                                      subquery2.c.output_new_files,
+                                      subquery2.c.output_failed_files,
+                                      subquery2.c.output_missing_files,)
 
             if request_id:
                 query = query.filter(models.Request.request_id == request_id)
@@ -470,14 +675,23 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
                     # t2 = dict(t)
                     t2 = dict(zip(t.keys(), t))
 
-                    if 'request_metadata' in t2 and t2['request_metadata'] and 'workflow' in t2['request_metadata']:
-                        workflow = t2['request_metadata']['workflow']
-                        workflow_data = None
-                        if 'processing_metadata' in t2 and t2['processing_metadata'] and 'workflow_data' in t2['processing_metadata']:
-                            workflow_data = t2['processing_metadata']['workflow_data']
-                        if workflow is not None and workflow_data is not None:
-                            workflow.metadata = workflow_data
-                            t2['request_metadata']['workflow'] = workflow
+                    if 'request_metadata' in t2 and t2['request_metadata']:
+                        if 'workflow' in t2['request_metadata']:
+                            workflow = t2['request_metadata']['workflow']
+                            workflow_data = None
+                            if 'processing_metadata' in t2 and t2['processing_metadata'] and 'workflow_data' in t2['processing_metadata']:
+                                workflow_data = t2['processing_metadata']['workflow_data']
+                            if workflow is not None and workflow_data is not None:
+                                workflow.metadata = workflow_data
+                                t2['request_metadata']['workflow'] = workflow
+                        if 'build_workflow' in t2['request_metadata']:
+                            build_workflow = t2['request_metadata']['build_workflow']
+                            build_workflow_data = None
+                            if 'processing_metadata' in t2 and t2['processing_metadata'] and 'build_workflow_data' in t2['processing_metadata']:
+                                build_workflow_data = t2['processing_metadata']['build_workflow_data']
+                            if build_workflow is not None and build_workflow_data is not None:
+                                build_workflow.metadata = build_workflow_data
+                                t2['request_metadata']['build_workflow'] = build_workflow
 
                     rets.append(t2)
             return rets
@@ -573,7 +787,7 @@ def get_requests_by_requester(scope, name, requester, to_json=False, session=Non
 @transactional_session
 def get_requests_by_status_type(status, request_type=None, time_period=None, request_ids=[], locking=False,
                                 locking_for_update=False, bulk_size=None, to_json=False, by_substatus=False,
-                                only_return_id=False, session=None):
+                                new_poll=False, update_poll=False, only_return_id=False, session=None):
     """
     Get requests.
 
@@ -607,12 +821,13 @@ def get_requests_by_status_type(status, request_type=None, time_period=None, req
                 query = query.filter(models.Request.substatus.in_(status))
             else:
                 query = query.filter(models.Request.status.in_(status))
-            query = query.filter(models.Request.next_poll_at <= datetime.datetime.utcnow())
+        if new_poll:
+            query = query.filter(models.Request.updated_at + models.Request.new_poll_period <= datetime.datetime.utcnow())
+        if update_poll:
+            query = query.filter(models.Request.updated_at + models.Request.update_poll_period <= datetime.datetime.utcnow())
 
         if request_type is not None:
             query = query.filter(models.Request.request_type == request_type)
-        # if time_period is not None:
-        #     query = query.filter(models.Request.updated_at < datetime.datetime.utcnow() - datetime.timedelta(seconds=time_period))
         if request_ids:
             query = query.filter(models.Request.request_id.in_(request_ids))
         if locking:
@@ -623,6 +838,7 @@ def get_requests_by_status_type(status, request_type=None, time_period=None, req
         else:
             query = query.order_by(asc(models.Request.updated_at))\
                          .order_by(desc(models.Request.priority))
+
         if bulk_size:
             query = query.limit(bulk_size)
 
@@ -643,7 +859,7 @@ def get_requests_by_status_type(status, request_type=None, time_period=None, req
 
 
 @transactional_session
-def update_request(request_id, parameters, session=None):
+def update_request(request_id, parameters, update_request_metadata=False, session=None):
     """
     update an request.
 
@@ -658,17 +874,35 @@ def update_request(request_id, parameters, session=None):
     try:
         parameters['updated_at'] = datetime.datetime.utcnow()
 
-        if 'request_metadata' in parameters and 'workflow' in parameters['request_metadata']:
-            workflow = parameters['request_metadata']['workflow']
-
-            if workflow is not None:
-                workflow.refresh_works()
-                if 'processing_metadata' not in parameters:
-                    parameters['processing_metadata'] = {}
-                parameters['processing_metadata']['workflow_data'] = workflow.metadata
+        if 'new_poll_period' in parameters and type(parameters['new_poll_period']) not in [datetime.timedelta]:
+            parameters['new_poll_period'] = datetime.timedelta(seconds=parameters['new_poll_period'])
+        if 'update_poll_period' in parameters and type(parameters['update_poll_period']) not in [datetime.timedelta]:
+            parameters['update_poll_period'] = datetime.timedelta(seconds=parameters['update_poll_period'])
 
         if 'request_metadata' in parameters:
-            del parameters['request_metadata']
+            if 'workflow' in parameters['request_metadata']:
+                workflow = parameters['request_metadata']['workflow']
+
+                if workflow is not None:
+                    workflow.refresh_works()
+                    if 'processing_metadata' not in parameters or not parameters['processing_metadata']:
+                        parameters['processing_metadata'] = {}
+                    parameters['processing_metadata']['workflow_data'] = workflow.metadata
+            if 'build_workflow' in parameters['request_metadata']:
+                build_workflow = parameters['request_metadata']['build_workflow']
+
+                if build_workflow is not None:
+                    build_workflow.refresh_works()
+                    if 'processing_metadata' not in parameters or not parameters['processing_metadata']:
+                        parameters['processing_metadata'] = {}
+                    parameters['processing_metadata']['build_workflow_data'] = build_workflow.metadata
+
+        if 'request_metadata' in parameters:
+            if not update_request_metadata:
+                del parameters['request_metadata']
+            else:
+                parameters['_request_metadata'] = parameters['request_metadata']
+                del parameters['request_metadata']
         if 'processing_metadata' in parameters:
             parameters['_processing_metadata'] = parameters['processing_metadata']
             del parameters['processing_metadata']

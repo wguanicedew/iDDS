@@ -18,7 +18,8 @@ from idds.workflow.work import Work
 class ATLASCondorWork(Work):
     def __init__(self, executable=None, arguments=None, parameters=None, setup=None,
                  work_type=None, work_tag='hpo', exec_type='local', sandbox=None, work_id=None,
-                 primary_input_collection=None, other_input_collections=None,
+                 primary_input_collection=None, other_input_collections=None, input_collections=None,
+                 primary_output_collection=None, other_output_collections=None,
                  output_collections=None, log_collections=None,
                  agent_attributes=None,
                  logger=None):
@@ -43,6 +44,9 @@ class ATLASCondorWork(Work):
                                               exec_type=exec_type, sandbox=sandbox, work_id=work_id,
                                               primary_input_collection=primary_input_collection,
                                               other_input_collections=other_input_collections,
+                                              primary_output_collection=primary_output_collection,
+                                              other_output_collections=other_output_collections,
+                                              input_collections=input_collections,
                                               output_collections=output_collections,
                                               log_collections=log_collections,
                                               agent_attributes=agent_attributes,
@@ -100,6 +104,10 @@ class ATLASCondorWork(Work):
         tf_outputs = output_files
 
         # self.logger.info("tf_inputs: %s, tf_outputs: %s" % (str(tf_inputs), str(tf_outputs)))
+
+        # if 'X509_USER_PROXY' in os.environ and os.environ['X509_USER_PROXY']:
+        #     proxy_filename = os.path.basename(os.environ['X509_USER_PROXY'])
+        #     tf_inputs = tf_inputs + [os.environ['X509_USER_PROXY']]
 
         if tf_inputs:
             jdl += "transfer_input_files = %s\n" % (str(','.join(tf_inputs)))

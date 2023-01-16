@@ -3,11 +3,12 @@ import os   # noqa E402
 import sys
 import datetime
 
-os.environ['PANDA_URL'] = 'http://ai-idds-01.cern.ch:25080/server/panda'
-os.environ['PANDA_URL_SSL'] = 'https://ai-idds-01.cern.ch:25443/server/panda'
+os.environ['PANDA_URL'] = 'http://pandaserver-doma.cern.ch:25080/server/panda'
+os.environ['PANDA_URL_SSL'] = 'https://pandaserver-doma.cern.ch:25443/server/panda'
 
-from pandatools import Client  # noqa E402
+from pandaclient import Client  # noqa E402
 
+"""
 jobids = [1408118]
 jobs_list_status = Client.getJobStatus(jobids, verbose=0)
 print(jobs_list_status)
@@ -26,18 +27,42 @@ for job_info in jobs_list:
             print(f._attributes)
             print(f.values())
             print(f.type)
+"""
 
-
-jediTaskID = 3885
+jediTaskID = 10517    # 10607
+jediTaskID = 59725
 ret = Client.getJediTaskDetails({'jediTaskID': jediTaskID}, True, True, verbose=False)
 print(ret)
 
-ret = Client.getTaskStatus(jediTaskID, verbose=False)
+# ret = Client.getTaskStatus(jediTaskID, verbose=False)
+# print(ret)
+
+task_info = ret[1]
+jobids = task_info['PandaID']
+ret = Client.getJobStatus(ids=jobids, verbose=False)
 print(ret)
 
-"""
-sys.exit(0)
+if ret[0] == 0:
+    jobs = ret[1]
+    left_jobids = []
+    ret_jobs = []
+    print(len(jobs))
+    for jobid, jobinfo in zip(jobids, jobs):
+        if jobinfo is None:
+            left_jobids.append(jobid)
+        else:
+            ret_jobs.append(jobinfo)
+    if left_jobids:
+        print(len(left_jobids))
+        ret = Client.getFullJobStatus(ids=left_jobids, verbose=False)
+        print(ret)
+        print(len(ret[1]))
+    ret_jobs = ret_jobs + ret[1]
+    print(len(ret_jobs))
 
+# sys.exit(0)
+
+"""
 jediTaskID = 998
 ret = Client.getPandaIDsWithTaskID(jediTaskID, verbose=False)
 # print(ret)
@@ -66,7 +91,9 @@ task_ids = []
 # task_ids = [i for i in range(1840, 1850)] + [i for i in range(1990, 2000)]
 # task_ids = [2549, 2560]
 # task_ids = [i for i in range(3692, 3723)]
-task_ids = []
+# task_ids = [3834, 3835, 3836]
+# task_ids = [i for i in range(141294, 142200)] + [i for i in range(141003, 141077)] + [i for i in range(141145, 141255)]
+task_ids = [140954, 140955, 142228]
 for task_id in task_ids:
     print("Killing %s" % task_id)
     Client.killTask(task_id)
@@ -102,11 +129,10 @@ newOpts = {}
 # site = newOpts.get('site', None)
 # excludedSite = newOpts.get('excludedSite', None)
 # for JEDI
-"""
-taskID=26034796
-status, out = Client.retryTask(taskID, verbose=True, properErrorCode=True, newParams=newOpts)
-print(status)
-print(out)
-"""
+taskIDs = [10624]
+for taskID in taskIDs:
+    status, out = Client.retryTask(taskID, verbose=True, properErrorCode=True, newParams=newOpts)
+    print(status)
+    print(out)
 
 sys.exit(0)

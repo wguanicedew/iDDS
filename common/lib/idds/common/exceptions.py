@@ -194,6 +194,26 @@ class ProcessNotFound(IDDSException):
         self.error_code = 403
 
 
+class ProcessFormatNotSupported(IDDSException):
+    """
+    ProcessFormatNotSupported
+    """
+    def __init__(self, *args, **kwargs):
+        super(ProcessFormatNotSupported, self).__init__(*args, **kwargs)
+        self._message = "Process format not support."
+        self.error_code = 404
+
+
+class ProcessSubmitFailed(IDDSException):
+    """
+    ProcessSubmitFailed
+    """
+    def __init__(self, *args, **kwargs):
+        super(ProcessSubmitFailed, self).__init__(*args, **kwargs)
+        self._message = "Failed to submit process."
+        self.error_code = 405
+
+
 class AgentException(IDDSException):
     """
     BrokerException
@@ -222,3 +242,43 @@ class AgentPluginError(AgentException):
         super(AgentPluginError, self).__init__(*args, **kwargs)
         self._message = "Agent plugin exception."
         self.error_code = 502
+
+
+class AuthenticationException(IDDSException):
+    """
+    AuthenticationException
+    """
+    def __init__(self, *args, **kwargs):
+        super(AuthenticationException, self).__init__(*args, **kwargs)
+        self._message = "Authentication exception."
+        self.error_code = 600
+
+
+class AuthenticationPending(IDDSException):
+    """
+    Authentication pending
+    """
+    def __init__(self, *args, **kwargs):
+        super(AuthenticationPending, self).__init__(*args, **kwargs)
+        self._message = "Authentication pending."
+        self.error_code = 601
+
+
+class AuthenticationNotSupported(IDDSException):
+    """
+    Authentication not supported
+    """
+    def __init__(self, *args, **kwargs):
+        super(AuthenticationNotSupported, self).__init__(*args, **kwargs)
+        self._message = "Authentication not supported."
+        self.error_code = 602
+
+
+class AuthenticationNoPermission(IDDSException):
+    """
+    Authentication No Permission
+    """
+    def __init__(self, *args, **kwargs):
+        super(AuthenticationNoPermission, self).__init__(*args, **kwargs)
+        self._message = "Authentication no permission."
+        self.error_code = 603

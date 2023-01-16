@@ -81,8 +81,12 @@ poll_time_period = 5
 retrieve_bulk_size = 10
 message_bulk_size = 2000
 
+atlaslocalpandawork.work_dir = /data/idds_processing
+
 [conductor]
 retrieve_bulk_size = 10
+threshold_to_release_messages = 1000
+random_delay = 60
 plugin.notifier = idds.atlas.notifier.messaging.MessagingSender
 # plugin.notifier.brokers = atlas-test-mb.cern.ch
 plugin.notifier.brokers = atlas-mb.cern.ch
@@ -94,6 +98,11 @@ plugin.notifier.username = atlasidds
 plugin.notifier.password = ******
 plugin.notifier.broker_timeout = 10
 
+# to receive messages from panda to update job status.
+# It's good that the value is smaller than the carrier poll_time_period
+# With it enabled, the carrier poll_time_period can be higher.
+receiver_delay_period = 60
+
 [consumer]
 retrieve_bulk_size = 10
 plugin.receiver = idds.atlas.notifier.messaging.MessagingReceiver
@@ -103,3 +112,7 @@ plugin.receiver.destination = /queue/Consumer.monitor.atlas.idds
 plugin.receiver.username = atlasidds
 plugin.receiver.password = *****
 plugin.receiver.broker_timeout = 10
+
+[cache]
+host = localhost
+port = 6379

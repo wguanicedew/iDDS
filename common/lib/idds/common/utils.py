@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2020
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2021
 
 
 import datetime
@@ -18,10 +18,11 @@ import requests
 import subprocess
 import sys
 import tarfile
-import traceback
+# import traceback
 
 from enum import Enum
 from functools import wraps
+from packaging import version as packaging_version
 
 from idds.common.config import (config_has_section, config_has_option,
                                 config_get, config_get_bool)
@@ -38,22 +39,64 @@ from idds.common.exceptions import IDDSException
 DATE_FORMAT = '%a, %d %b %Y %H:%M:%S UTC'
 
 
-def setup_logging(name):
+def setup_logging(name, stream=None, loglevel=None):
     """
     Setup logging
     """
-    if config_has_section('common') and config_has_option('common', 'loglevel'):
-        loglevel = getattr(logging, config_get('common', 'loglevel').upper())
-    else:
-        loglevel = logging.INFO
+    if loglevel is None:
+        if config_has_section('common') and config_has_option('common', 'loglevel'):
+            loglevel = getattr(logging, config_get('common', 'loglevel').upper())
+        else:
+            loglevel = logging.INFO
 
-    if config_has_section('common') and config_has_option('common', 'logdir'):
-        logging.basicConfig(filename=os.path.join(config_get('common', 'logdir'), name),
-                            level=loglevel,
-                            format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
+    if os.environ.get('IDDS_LOG_LEVEL', None):
+        idds_log_level = os.environ.get('IDDS_LOG_LEVEL', None)
+        idds_log_level = idds_log_level.upper()
+        if idds_log_level in ["DEBUG", "CRITICAL", "ERROR", "WARNING", "INFO"]:
+            loglevel = getattr(logging, idds_log_level)
+
+    if stream is None:
+        if config_has_section('common') and config_has_option('common', 'logdir'):
+            logging.basicConfig(filename=os.path.join(config_get('common', 'logdir'), name),
+                                level=loglevel,
+                                format='%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s')
+        else:
+            logging.basicConfig(stream=sys.stdout, level=loglevel,
+                                format='%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s')
     else:
-        logging.basicConfig(stream=sys.stdout, level=loglevel,
-                            format='%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s')
+        logging.basicConfig(stream=stream, level=loglevel,
+                            format='%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s')
+
+
+def get_logger(name, filename=None, loglevel=None):
+    """
+    Setup logging
+    """
+    if loglevel is None:
+        if config_has_section('common') and config_has_option('common', 'loglevel'):
+            loglevel = getattr(logging, config_get('common', 'loglevel').upper())
+        else:
+            loglevel = logging.INFO
+
+    if filename is None:
+        filename = name + ".log"
+    if not filename.startswith("/"):
+        logdir = None
+        if config_has_section('common') and config_has_option('common', 'logdir'):
+            logdir = config_get('common', 'logdir')
+        if not logdir:
+            logdir = '/var/log/idds'
+        filename = os.path.join(logdir, filename)
+
+    formatter = logging.Formatter('%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s')
+
+    handler = logging.FileHandler(filename)
+    handler.setFormatter(formatter)
+    logger = logging.getLogger(name)
+    logger.setLevel(loglevel)
+    logger.addHandler(handler)
+    logger.propagate = False
+    return logger
 
 
 def get_rest_url_prefix():
@@ -140,6 +183,8 @@ def get_rest_host():
     """
     Function to get rest host
     """
+    if "IDDS_HOST" in os.environ:
+        return os.environ.get("IDDS_HOST")
     host = config_get('rest', 'host')
     url_prefix = get_rest_url_prefix()
     while host.endswith("/"):
@@ -342,6 +387,8 @@ class DictClassEncoder(json.JSONEncoder):
             return obj.to_dict()
         elif isinstance(obj, datetime.datetime):
             return date_to_str(obj)
+        elif isinstance(obj, datetime.timedelta):
+            return str(obj)
         # elif isinstance(obj, (datetime.time, datetime.date)):
         #     return obj.isoformat()
         # elif isinstance(obj, datetime.timedelta):
@@ -405,11 +452,11 @@ def exception_handler(function):
             return function(*args, **kwargs)
         except IDDSException as ex:
             logging.error(ex)
-            print(traceback.format_exc())
+            # print(traceback.format_exc())
             return str(ex)
         except Exception as ex:
             logging.error(ex)
-            print(traceback.format_exc())
+            # print(traceback.format_exc())
             return str(ex)
     return new_funct
 
@@ -452,4 +499,27 @@ def get_proxy():
 
 
 def is_new_version(version1, version2):
-    return version1 > version2
+    return packaging_version.parse(version1) > packaging_version.parse(version2)
+
+
+def extract_scope_atlas(did, scopes):
+    # Try to extract the scope from the DSN
+    if did.find(':') > -1:
+        if len(did.split(':')) > 2:
+            raise IDDSException('Too many colons. Cannot extract scope and name')
+        scope, name = did.split(':')[0], did.split(':')[1]
+        if name.endswith('/'):
+            name = name[:-1]
+        return scope, name
+    else:
+        scope = did.split('.')[0]
+        if did.startswith('user') or did.startswith('group'):
+            scope = ".".join(did.split('.')[0:2])
+        if did.endswith('/'):
+            did = did[:-1]
+        return scope, did
+
+
+def truncate_string(string, length=800):
+    string = (string[:length] + '...') if string and len(string) > length else string
+    return string
