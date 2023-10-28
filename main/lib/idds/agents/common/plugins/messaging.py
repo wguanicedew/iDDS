@@ -6,11 +6,10 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2022
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
 
 
 import logging
-import json
 import random
 import socket
 import threading
@@ -19,7 +18,7 @@ import traceback
 import stomp
 
 from idds.common.plugin.plugin_base import PluginBase
-from idds.common.utils import setup_logging, get_logger
+from idds.common.utils import setup_logging, get_logger, json_dumps, json_loads
 
 
 setup_logging(__name__)
@@ -63,15 +62,22 @@ class MessagingSender(PluginBase, threading.Thread):
         if logger:
             self.logger = logger
         self.graceful_stop = threading.Event()
+        self.graceful_suspend = threading.Event()
+
         self.request_queue = None
         self.output_queue = None
         self.response_queue = None
 
         if not hasattr(self, 'channels'):
             raise Exception('"channels" is required but not defined.')
-        self.channels = json.loads(self.channels)
+        self.channels = json_loads(self.channels)
 
         self.broker_timeout = 3600
+
+        if not hasattr(self, 'timetolive'):
+            self.timetolive = 12 * 3600 * 1000     # milliseconds
+        else:
+            self.timetolive = int(self.timetolive)
 
         self.conns = []
 
@@ -90,6 +96,15 @@ class MessagingSender(PluginBase, threading.Thread):
     def stop(self):
         self.graceful_stop.set()
 
+    def suspend(self):
+        self.graceful_suspend.set()
+
+    def resume(self):
+        self.graceful_suspend.clear()
+
+    def is_processing(self):
+        return (not self.graceful_stop.is_set()) and (not self.graceful_suspend.is_set())
+
     def set_request_queue(self, request_queue):
         self.request_queue = request_queue
 
@@ -103,60 +118,73 @@ class MessagingSender(PluginBase, threading.Thread):
         channel_conns = {}
         for name in self.channels:
             channel = self.channels[name]
-            brokers = channel['brokers']
-            if type(brokers) in [list, tuple]:
-                pass
+            if channel and 'brokers' in channel:
+                brokers = channel['brokers']
+                if type(brokers) in [list, tuple]:
+                    pass
+                else:
+                    brokers = brokers.split(",")
+                # destination = channel['destination']
+                # username = channel['username']
+                # password = channel['password']
+                broker_timeout = channel['broker_timeout']
+
+                broker_addresses = []
+                for b in brokers:
+                    try:
+                        b, port = b.split(":")
+
+                        addrinfos = socket.getaddrinfo(b, 0, socket.AF_INET, 0, socket.IPPROTO_TCP)
+                        for addrinfo in addrinfos:
+                            b_addr = addrinfo[4][0]
+                            broker_addresses.append((b_addr, port))
+                    except socket.gaierror as error:
+                        self.logger.error('Cannot resolve hostname %s: %s' % (b, str(error)))
+
+                self.logger.info("Resolved broker addresses for channel %s: %s" % (name, broker_addresses))
+
+                timeout = broker_timeout
+
+                conns = []
+                for broker, port in broker_addresses:
+                    conn = stomp.Connection12(host_and_ports=[(broker, port)],
+                                              keepalive=True,
+                                              heartbeats=(30000, 30000),     # half minute = num / 1000
+                                              timeout=timeout)
+                    conns.append(conn)
+                channel_conns[name] = conns
             else:
-                brokers = brokers.split(",")
-            # destination = channel['destination']
-            # username = channel['username']
-            # password = channel['password']
-            broker_timeout = channel['broker_timeout']
-
-            broker_addresses = []
-            for b in brokers:
-                try:
-                    b, port = b.split(":")
-
-                    addrinfos = socket.getaddrinfo(b, 0, socket.AF_INET, 0, socket.IPPROTO_TCP)
-                    for addrinfo in addrinfos:
-                        b_addr = addrinfo[4][0]
-                        broker_addresses.append((b_addr, port))
-                except socket.gaierror as error:
-                    self.logger.error('Cannot resolve hostname %s: %s' % (b, str(error)))
-
-            self.logger.info("Resolved broker addresses for channel %s: %s" % (name, broker_addresses))
-
-            timeout = broker_timeout
-
-            conns = []
-            for broker, port in broker_addresses:
-                conn = stomp.Connection12(host_and_ports=[(broker, port)],
-                                          keepalive=True,
-                                          heartbeats=(60000, 60000),     # one minute
-                                          timeout=timeout)
-                conns.append(conn)
-            channel_conns[name] = conns
+                channel_conns[name] = None
         return channel_conns
 
     def disconnect(self, conns):
         for name in conns:
-            for conn in conns[name]:
-                try:
-                    conn.disconnect()
-                except Exception:
-                    pass
+            if conns[name]:
+                for conn in conns[name]:
+                    try:
+                        if conn.is_connected():
+                            conn.disconnect()
+                    except Exception:
+                        pass
 
     def get_connection(self, destination):
         try:
             if destination not in self.conns:
                 destination = 'default'
-            conn = random.sample(self.conns[destination], 1)[0]
-            queue_dest = self.channels[destination]['destination']
-            if not conn.is_connected():
-                # conn.start()
-                conn.connect(self.username, self.password, wait=True)
+            if self.conns[destination]:
+                conn = random.sample(self.conns[destination], 1)[0]
+                queue_dest = self.channels[destination]['destination']
+                username = self.channels[destination]['username']
+                password = self.channels[destination]['password']
+                if not conn.is_connected():
+                    # conn.start()
+                    conn.connect(username, password, wait=True)
                 return conn, queue_dest, destination
+            elif self.conns[destination] is None:
+                return None, None, destination
+            else:
+                # return None, None, destination
+                pass
         except Exception as error:
             self.logger.error("Failed to connect to message broker(will re-resolve brokers): %s" % str(error))
 
@@ -178,15 +206,19 @@ class MessagingSender(PluginBase, threading.Thread):
         destination = msg['destination'] if 'destination' in msg else 'default'
         conn, queue_dest, destination = self.get_connection(destination)
 
-        self.logger.info("Sending message to message broker(%s): %s" % (destination, msg['msg_id']))
-        self.logger.debug("Sending message to message broker(%s): %s" % (destination, json.dumps(msg['msg_content'])))
-        conn.send(body=json.dumps(msg['msg_content']),
-                  destination=queue_dest,
-                  id='atlas-idds-messaging',
-                  ack='auto',
-                  headers={'persistent': 'true',
-                           'vo': 'atlas',
-                           'msg_type': str(msg['msg_type']).lower()})
+        if conn:
+            self.logger.info("Sending message to message broker(%s): %s" % (destination, msg['msg_id']))
+            self.logger.debug("Sending message to message broker(%s): %s" % (destination, json_dumps(msg['msg_content'])))
+            conn.send(body=json_dumps(msg['msg_content']),
+                      destination=queue_dest,
+                      id='atlas-idds-messaging',
+                      ack='auto',
+                      headers={'persistent': 'true',
+                               'ttl': self.timetolive,
+                               'vo': 'atlas',
+                               'msg_type': str(msg['msg_type']).lower()})
+        else:
+            self.logger.info("No brokers defined, discard(%s): %s" % (destination, msg['msg_id']))
 
     def execute_send(self):
         try:
@@ -243,28 +275,41 @@ class MessagingReceiver(MessagingSender):
         except Exception as error:
             self.logger.error("Messaging receiver throws an exception: %s, %s" % (error, traceback.format_exc()))
 
+        sleep_count = 0
         while not self.graceful_stop.is_set():
-            has_failed_connection = False
-            try:
-                for name in self.receiver_conns:
-                    for conn in self.receiver_conns[name]:
-                        if not conn.is_connected():
-                            conn.set_listener('message-receiver', self.get_listener(conn.transport._Transport__host_and_ports[0]))
-                            # conn.start()
-                            conn.connect(self.channels[name]['username'], self.channels[name]['password'], wait=True)
-                            conn.subscribe(destination=self.channels[name]['destination'], id='atlas-idds-messaging', ack='auto')
-                time.sleep(0.1)
-            except Exception as error:
-                self.logger.error("Messaging receiver throws an exception: %s, %s" % (error, traceback.format_exc()))
-                has_failed_connection = True
-
-            if has_failed_connection or len(self.receiver_conns) == 0:
+            if self.graceful_suspend.is_set():
                 try:
-                    # re-subscribe
                     self.disconnect(self.receiver_conns)
-                    self.subscribe()
                 except Exception as error:
                     self.logger.error("Messaging receiver throws an exception: %s, %s" % (error, traceback.format_exc()))
+                time.sleep(1)
+                sleep_count += 1
+                if sleep_count > 300:
+                    self.logger.info("graceful_suspend is set. sleeping")
+                    sleep_count = 0
+            else:
+                sleep_count = 0
+                has_failed_connection = False
+                try:
+                    for name in self.receiver_conns:
+                        for conn in self.receiver_conns[name]:
+                            if not conn.is_connected():
+                                conn.set_listener('message-receiver', self.get_listener(conn.transport._Transport__host_and_ports[0]))
+                                # conn.start()
+                                conn.connect(self.channels[name]['username'], self.channels[name]['password'], wait=True)
+                                conn.subscribe(destination=self.channels[name]['destination'], id='atlas-idds-messaging', ack='auto')
+                    time.sleep(0.1)
+                except Exception as error:
+                    self.logger.error("Messaging receiver throws an exception: %s, %s" % (error, traceback.format_exc()))
+                    has_failed_connection = True
+
+                if has_failed_connection or len(self.receiver_conns) == 0:
+                    try:
+                        # re-subscribe
+                        self.disconnect(self.receiver_conns)
+                        self.subscribe()
+                    except Exception as error:
+                        self.logger.error("Messaging receiver throws an exception: %s, %s" % (error, traceback.format_exc()))
 
         self.logger.info('receiver graceful stop requested')
 

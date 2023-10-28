@@ -238,3 +238,216 @@ alter table contents_update add (
 	transform_id NUMBER(12),
 	workload_id NUMBER(10),
 	coll_id NUMBER(14));
+
+-- 2023.02.01
+--- update (select c.content_id, c.substatus as c_substatus, t.substatus as t_substatus from  contents c inner join
+-- (select content_id, substatus from contents where request_id=486 and transform_id=3027 and content_relation_type =1 and status != substatus) t
+--- on c.content_dep_id = t.content_id where c.request_id=486 and c.substatus != t.substatus) set c_substatus = t_substatus;
+
+--- remove 
+"""
+CREATE OR REPLACE FUNCTION update_contents_to_others(request_id_in IN NUMBER, transform_id_in IN NUMBER)
+RETURN NUMBER
+IS num_rows NUMBER;
+BEGIN
+    update (select c.content_id, c.substatus as c_substatus, t.substatus as t_substatus from  contents c inner join
+    (select content_id, substatus from contents where request_id = request_id_in and transform_id = transform_id_in and content_relation_type = 1 and status != substatus) t
+    on c.content_dep_id = t.content_id where c.request_id = request_id_in and c.substatus != t.substatus) set c_substatus = t_substatus;
+    
+    num_rows := SQL%rowcount;
+    RETURN (num_rows);
+END;
+
+CREATE OR REPLACE FUNCTION update_contents_from_others(request_id_in IN NUMBER, transform_id_in IN NUMBER)
+RETURN NUMBER
+IS num_rows NUMBER;
+BEGIN
+    update (select c.content_id, c.substatus as c_substatus, t.substatus as t_substatus from  contents c inner join
+    (select content_id, substatus from contents where request_id = request_id_in and content_relation_type = 1 and status != 0) t
+    on c.content_dep_id = t.content_id where c.request_id = request_id_in and c.transform_id = transform_id_in and c.substatus != t.substatus) set c_substatus = t_substatus;
+
+    num_rows := SQL%rowcount;
+    RETURN (num_rows);
+END;
+"""
+
+CREATE OR REPLACE procedure update_contents_from_others(request_id_in NUMBER, transform_id_in NUMBER) AS
+BEGIN
+    update (select c.content_id, c.substatus as c_substatus, t.substatus as t_substatus from  contents c inner join
+    (select content_id, substatus from contents where request_id = request_id_in and content_relation_type = 1) t
+    on c.content_dep_id = t.content_id where c.request_id = request_id_in and c.transform_id = transform_id_in and c.content_relation_type = 3 and c.substatus != t.substatus) set c_substatus = t_substatus;
+END;
+
+
+CREATE OR REPLACE procedure update_contents_to_others(request_id_in NUMBER, transform_id_in NUMBER) AS
+BEGIN
+    update (select c.content_id, c.substatus as c_substatus, t.substatus as t_substatus from  contents c inner join
+    (select content_id, substatus from contents where request_id = request_id_in and transform_id = transform_id_in and content_relation_type = 1) t
+    on c.content_dep_id = t.content_id where c.request_id = request_id_in and c.content_relation_type = 3 and c.substatus != t.substatus) set c_substatus = t_substatus;
+END;
+
+
+
+-- 2023.02.14
+drop index CONTENTS_REQ_TF_COLL_IDX
+CREATE INDEX CONTENTS_REQ_TF_COLL_IDX ON CONTENTS (request_id, transform_id, workload_id, coll_id, content_relation_type, status, substatus) LOCAL;
+
+
+-- 2023.02.22
+
+CREATE OR REPLACE procedure update_contents_from_others(request_id_in NUMBER, transform_id_in NUMBER) AS
+BEGIN
+    update (select c.content_id, c.substatus as c_substatus, t.substatus as t_substatus from  
+    (select content_id, substatus, content_dep_id from contents where request_id = request_id_in and transform_id = transform_id_in and content_relation_type = 3) c inner join
+    (select content_id, substatus from contents where request_id = request_id_in and content_relation_type = 1) t
+    on c.content_dep_id = t.content_id where c.substatus != t.substatus) set c_substatus = t_substatus;
+END;
+
+
+CREATE OR REPLACE procedure update_contents_to_others(request_id_in NUMBER, transform_id_in NUMBER) AS
+BEGIN
+    update (select c.content_id, c.substatus as c_substatus, t.substatus as t_substatus from  
+    (select content_id, substatus, content_dep_id from contents where request_id = request_id_in and content_relation_type = 3) c inner join
+    (select content_id, substatus from contents where request_id = request_id_in and transform_id = transform_id_in and content_relation_type = 1) t
+    on c.content_dep_id = t.content_id where c.substatus != t.substatus) set c_substatus = t_substatus;
+END;
+
+
+
+--- 2023.03.06
+drop index PROCESSINGS_STATUS_POLL_IDX;
+drop index CONTENTS_REL_IDX;
+drop index CONTENTS_TF_IDX;
+drop index CONTENTS_EXT_RTW_IDX;
+drop index CONTENTS_EXT_RTM_IDX;
+drop index COMMANDS_STATUS_IDX;
+drop index MESSAGES_ST_IDX;
+drop index MESSAGES_TYPE_STU_IDX;
+drop index REQUESTS_STATUS_POLL_IDX;
+drop index TRANSFORMS_REQ_IDX;
+drop index TRANSFORMS_STATUS_POLL_IDX;
+drop index COLLECTIONS_REQ_IDX;
+
+CREATE INDEX PROCESSINGS_STATUS_POLL_IDX ON PROCESSINGS (status, processing_id, locking, updated_at, new_poll_period, update_poll_period, created_at) COMPRESS 3 LOCAL;
+
+CREATE INDEX CONTENTS_REL_IDX ON CONTENTS  (request_id, content_relation_type, transform_id, substatus) COMPRESS 3 LOCAL;
+CREATE INDEX CONTENTS_TF_IDX ON CONTENTS  (transform_id, request_id, coll_id, content_relation_type, map_id) COMPRESS 4 LOCAL;
+
+CREATE INDEX CONTENTS_EXT_RTW_IDX ON contents_ext (request_id, transform_id, workload_id) COMPRESS 3 ;
+CREATE INDEX CONTENTS_EXT_RTM_IDX ON contents_ext (request_id, transform_id, map_id) COMPRESS 2;
+
+CREATE INDEX COMMANDS_STATUS_IDX on commands (status, locking, updated_at) COMPRESS 2;
+
+CREATE INDEX MESSAGES_ST_IDX on messages (status, destination, created_at) COMPRESS 2;
+CREATE INDEX MESSAGES_TYPE_STU_IDX on messages (msg_type, status, destination, retries, updated_at, created_at) COMPRESS 3;
+
+CREATE INDEX REQUESTS_STATUS_POLL_IDX on REQUESTS (status, request_id, locking, priority, updated_at, new_poll_period, update_poll_period, next_poll_at, created_at) COMPRESS 3 LOCAL;
+
+CREATE INDEX TRANSFORMS_REQ_IDX on transforms (request_id, transform_id) COMPRESS 2;
+CREATE INDEX TRANSFORMS_STATUS_POLL_IDX on transforms (status, transform_id, locking, updated_at, new_poll_period, update_poll_period, created_at) COMPRESS 3 LOCAL;
+
+CREATE INDEX COLLECTIONS_REQ_IDX on collections (request_id, transform_id, updated_at) COMPRESS 2;
+
+
+-- 2023.03.10
+
+CREATE SEQUENCE EVENT_ID_SEQ MINVALUE 1 INCREMENT BY 1 START WITH 1 NOCACHE ORDER NOCYCLE GLOBAL;
+CREATE TABLE EVENTS
+(
+    event_id NUMBER(12) DEFAULT ON NULL EVENT_ID_SEQ.NEXTVAL constraint EVENT_ID_NN NOT NULL,
+    event_type NUMBER(12),
+    event_actual_id NUMBER(12),
+    priority NUMBER(12),
+    status NUMBER(2),
+    created_at DATE DEFAULT SYS_EXTRACT_UTC(systimestamp(0)),
+    processing_at DATE DEFAULT SYS_EXTRACT_UTC(systimestamp(0)),
+    processed_at DATE DEFAULT SYS_EXTRACT_UTC(systimestamp(0)),
+    content CLOB,
+    CONSTRAINT EVENTS_PK PRIMARY KEY (event_id) -- USING INDEX LOCAL,
+);
+
+CREATE TABLE EVENTS_ARCHIVE
+(
+    event_id NUMBER(12),
+    event_type NUMBER(12),
+    event_actual_id NUMBER(12),
+    priority NUMBER(12),
+    status NUMBER(2),
+    created_at DATE DEFAULT SYS_EXTRACT_UTC(systimestamp(0)),
+    processing_at DATE DEFAULT SYS_EXTRACT_UTC(systimestamp(0)),
+    processed_at DATE DEFAULT SYS_EXTRACT_UTC(systimestamp(0)),
+    content CLOB,
+    CONSTRAINT EVENTS_AR_PK PRIMARY KEY (event_id) -- USING INDEX LOCAL,
+);
+
+CREATE TABLE EVENTS_PRIORITY
+(
+    event_type NUMBER(12),
+    event_actual_id NUMBER(12),
+    priority NUMBER(12),
+    last_processed_at DATE DEFAULT SYS_EXTRACT_UTC(systimestamp(0)),
+    updated_at DATE DEFAULT SYS_EXTRACT_UTC(systimestamp(0)),
+    CONSTRAINT EVENTS_PR_PK PRIMARY KEY (event_type, event_actual_id) -- USING INDEX LOCAL,
+);
+
+
+--- 2023.03.16
+alter table HEALTH add (status NUMBER(2));
+alter table contents_update add content_metadata CLOB;
+alter table health modify payload VARCHAR2(2048);
+
+
+--- 2023.03.29
+alter table contents_update add fetch_status NUMBER(2) DEFAULT 0;
+
+
+-- 2023.05.18
+alter table requests add site VARCHAR2(50);
+CREATE INDEX REQUESTS_STATUS_SITE ON requests  (status, site, request_id) COMPRESS 3 LOCAL;
+
+alter table transforms add site VARCHAR2(50);
+CREATE INDEX TRANSFORMS_STATUS_SITE ON transforms  (status, site, request_id, transform_id) COMPRESS 3 LOCAL;
+
+alter table processings add site VARCHAR2(50);
+CREATE INDEX PROCESSINGS_STATUS_SITE ON processings  (status, site, request_id, transform_id, processing_id) COMPRESS 3 LOCAL;
+
+alter table messages add fetching_id NUMBER(12);
+
+
+CREATE SEQUENCE THROTTLER_ID_SEQ MINVALUE 1 INCREMENT BY 1 START WITH 1 NOCACHE ORDER NOCYCLE GLOBAL;
+CREATE TABLE Throttlers
+(
+    throttler_id NUMBER(12) DEFAULT ON NULL THROTTLER_ID_SEQ.NEXTVAL constraint THROTTLER_ID_NN NOT NULL,
+    site VARCHAR2(50),
+    status NUMBER(2),
+    num_requests NUMBER(12),
+    num_transforms NUMBER(12),
+    num_processings NUMBER(12),
+    new_contents NUMBER(12),
+    queue_contents NUMBER(12),
+    created_at DATE DEFAULT SYS_EXTRACT_UTC(systimestamp(0)),
+    updated_at DATE DEFAULT SYS_EXTRACT_UTC(systimestamp(0)),
+    others CLOB,
+    CONSTRAINT THROTTLER_PK PRIMARY KEY (throttler_id), -- USING INDEX LOCAL,
+    CONSTRAINT THROTTLER_SITE_UQ UNIQUE (site)
+);
+
+alter table Messages add (poll_period INTERVAL DAY TO SECOND DEFAULT '00 00:05:00');
+
+
+--- 20230626
+alter table contents add (external_coll_id NUMBER(12), external_content_id NUMBER(12), external_event_id NUMBER(12), external_event_status NUMBER(2));
+
+alter table contents add (sub_map_id NUMBER(12) default 0);
+alter table contents add (dep_sub_map_id NUMBER(12) default 0);
+alter table contents drop constraint CONTENT_ID_UQ;
+alter table contents add constraint CONTENT_ID_UQ UNIQUE (transform_id, coll_id, map_id, sub_map_id, dep_sub_map_id, content_relation_type, name, min_id, max_id) USING INDEX LOCAL;
+
+
+--- 20230927
+alter table contents add (name_md5 varchar2(33), scope_name_md5 varchar2(33));
+update contents set name_md5=standard_hash(name, 'MD5'), scope_name_md5=standard_hash(scope || name, 'MD5');
+alter table contents drop constraint CONTENT_ID_UQ;
+alter table contents add constraint CONTENT_ID_UQ UNIQUE (transform_id, coll_id, map_id, sub_map_id, dep_sub_map_id, content_relation_type, name_md5, scope_name_md5, min_id, max_id) USING INDEX LOCAL;
+drop index CONTENTS_ID_NAME_IDX;
+CREATE INDEX CONTENTS_ID_NAME_IDX ON CONTENTS (coll_id, scope, standard_hash(name, 'MD5'), status);

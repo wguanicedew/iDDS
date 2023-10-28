@@ -28,6 +28,10 @@ dependencies:
   - cryptography
   - redis
   - alembic
+  - deepdiff
+  - pyzmq
+  - oic
+  - lsst-ctrl-bps
   - idds-common==0.11.5
   - idds-workflow==0.11.5
   - idds-client==0.11.5

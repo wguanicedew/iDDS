@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2022
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
 
 import datetime
 import random
@@ -14,8 +14,8 @@ import time
 import traceback
 
 from idds.common import exceptions
-from idds.common.constants import Sections, ProcessingStatus, ProcessingLocking
-from idds.common.utils import setup_logging, truncate_string
+from idds.common.constants import Sections, ReturnCode, ProcessingStatus, ProcessingLocking
+from idds.common.utils import setup_logging, truncate_string, json_dumps
 from idds.core import processings as core_processings
 from idds.agents.common.baseagent import BaseAgent
 from idds.agents.common.eventbus.event import (EventType,
@@ -34,8 +34,14 @@ class Poller(BaseAgent):
     Poller works to submit and running tasks to WFMS.
     """
 
-    def __init__(self, num_threads=1, poll_period=10, retries=3, retrieve_bulk_size=2,
-                 name='Poller', message_bulk_size=1000, **kwargs):
+    def __init__(self, num_threads=1, max_number_workers=3, poll_period=10, retries=3, retrieve_bulk_size=2,
+                 max_updates_per_round=2000, name='Poller', message_bulk_size=1000, **kwargs):
+        self.max_number_workers = max_number_workers
+        if int(num_threads) < int(self.max_number_workers):
+            num_threads = int(self.max_number_workers)
+
+        self.set_max_workers()
+
         super(Poller, self).__init__(num_threads=num_threads, name=name, **kwargs)
         self.config_section = Sections.Carrier
         self.poll_period = int(poll_period)
@@ -51,6 +57,11 @@ class Poller(BaseAgent):
             self.update_poll_period = self.poll_period
         else:
             self.update_poll_period = int(self.update_poll_period)
+
+        if not hasattr(self, 'update_poll_period_for_new_task') or not self.update_poll_period_for_new_task:
+            self.update_poll_period_for_new_task = 180
+        else:
+            self.update_poll_period_for_new_task = int(self.update_poll_period_for_new_task)
 
         if hasattr(self, 'poll_period_increase_rate'):
             self.poll_period_increase_rate = float(self.poll_period_increase_rate)
@@ -72,14 +83,26 @@ class Poller(BaseAgent):
         else:
             self.max_number_workers = int(self.max_number_workers)
 
+        self.max_updates_per_round = max_updates_per_round
+        self.logger.info("max_updates_per_round: %s" % self.max_updates_per_round)
+
+        self.show_queue_size_time = None
+
     def is_ok_to_run_more_processings(self):
         if self.number_workers >= self.max_number_workers:
             return False
         return True
 
     def show_queue_size(self):
-        if self.number_workers > 0:
+        if self.show_queue_size_time is None or time.time() - self.show_queue_size_time >= 600:
+            self.show_queue_size_time = time.time()
+
             q_str = "number of processings: %s, max number of processings: %s" % (self.number_workers, self.max_number_workers)
+            self.logger.debug(q_str)
+
+            exec_max_workers = self.executors.get_max_workers()
+            exec_num_workers = self.executors.get_num_workers()
+            q_str = "Executor number of processings: %s, max number of processings: %s" % (exec_num_workers, exec_max_workers)
             self.logger.debug(q_str)
 
     def init(self):
@@ -116,10 +139,12 @@ class Poller(BaseAgent):
             if processings:
                 self.logger.info("Main thread get [submitting + submitted + running] processings to process: %s" % (str(processings)))
 
+            events = []
             for pr_id in processings:
                 self.logger.info("UpdateProcessingEvent(processing_id: %s)" % pr_id)
                 event = UpdateProcessingEvent(publisher_id=self.id, processing_id=pr_id)
-                self.event_bus.send(event)
+                events.append(event)
+            self.event_bus.send_bulk(events)
 
             return processings
         except exceptions.DatabaseException as ex:
@@ -151,7 +176,7 @@ class Poller(BaseAgent):
                 work_tag_attribute_value = int(getattr(self, work_tag_attribute))
         return work_tag_attribute_value
 
-    def load_poll_period(self, processing, parameters):
+    def load_poll_period(self, processing, parameters, new=False):
         proc = processing['processing_metadata']['processing']
         work = proc.work
         work_tag = work.get_work_tag()
@@ -162,11 +187,14 @@ class Poller(BaseAgent):
         elif self.new_poll_period and processing['new_poll_period'] != self.new_poll_period:
             parameters['new_poll_period'] = self.new_poll_period
 
-        work_tag_update_poll_period = self.get_work_tag_attribute(work_tag, "update_poll_period")
-        if work_tag_update_poll_period:
-            parameters['update_poll_period'] = work_tag_update_poll_period
-        elif self.update_poll_period and processing['update_poll_period'] != self.update_poll_period:
-            parameters['update_poll_period'] = self.update_poll_period
+        if new:
+            parameters['update_poll_period'] = self.update_poll_period_for_new_task
+        else:
+            work_tag_update_poll_period = self.get_work_tag_attribute(work_tag, "update_poll_period")
+            if work_tag_update_poll_period:
+                parameters['update_poll_period'] = work_tag_update_poll_period
+            elif self.update_poll_period and processing['update_poll_period'] != self.update_poll_period:
+                parameters['update_poll_period'] = self.update_poll_period
         return parameters
 
     def get_log_prefix(self, processing):
@@ -184,6 +212,13 @@ class Poller(BaseAgent):
                 processing['update_processing']['parameters']['locking'] = ProcessingLocking.Idle
                 # self.logger.debug("wen: %s" % str(processing))
                 processing['update_processing']['parameters']['updated_at'] = datetime.datetime.utcnow()
+                # check update_processing status
+                if 'status' in processing['update_processing']['parameters']:
+                    new_status = processing['update_processing']['parameters']['status']
+                    if new_status == ProcessingStatus.Submitting and processing_model['status'].value > ProcessingStatus.Submitting.value:
+                        processing['update_processing']['parameters']['status'] = ProcessingStatus.Submitted
+
+                self.logger.info(log_prefix + "update_processing: %s" % (processing['update_processing']['parameters']))
 
                 retry = True
                 retry_num = 0
@@ -223,6 +258,7 @@ class Poller(BaseAgent):
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
+            self.logger.warn("Failed to update_processings: %s" % json_dumps(processing))
             try:
                 processing_id = processing['update_processing']['processing_id']
 
@@ -246,6 +282,7 @@ class Poller(BaseAgent):
             log_prefix = self.get_log_prefix(processing)
             ret_handle_update_processing = handle_update_processing(processing,
                                                                     self.agent_attributes,
+                                                                    max_updates_per_round=self.max_updates_per_round,
                                                                     logger=self.logger,
                                                                     log_prefix=log_prefix)
 
@@ -349,6 +386,7 @@ class Poller(BaseAgent):
 
     def process_update_processing(self, event):
         self.number_workers += 1
+        pro_ret = ReturnCode.Ok.value
         try:
             if event:
                 original_event = event
@@ -357,6 +395,7 @@ class Poller(BaseAgent):
                 pr = self.get_processing(processing_id=event._processing_id, status=None, locking=True)
                 if not pr:
                     self.logger.error("Cannot find processing for event: %s" % str(event))
+                    pro_ret = ReturnCode.Locked.value
                 else:
                     log_pre = self.get_log_prefix(pr)
 
@@ -372,6 +411,8 @@ class Poller(BaseAgent):
                             event_content['has_updates'] = True
                         if is_process_terminated(pr['substatus']):
                             event_content['Terminated'] = True
+                            event_content['is_terminating'] = True
+                        self.logger.info(log_pre + "TriggerProcessingEvent(processing_id: %s)" % pr['processing_id'])
                         event = TriggerProcessingEvent(publisher_id=self.id, processing_id=pr['processing_id'], content=event_content,
                                                        counter=original_event._counter)
                         self.event_bus.send(event)
@@ -379,6 +420,7 @@ class Poller(BaseAgent):
                         self.logger.info(log_pre + "TerminatedProcessingEvent(processing_id: %s)" % pr['processing_id'])
                         event = TerminatedProcessingEvent(publisher_id=self.id, processing_id=pr['processing_id'],
                                                           counter=original_event._counter)
+                        event.set_terminating()
                         self.event_bus.send(event)
                     else:
                         if (('update_contents' in ret and ret['update_contents'])
@@ -389,11 +431,14 @@ class Poller(BaseAgent):
                             self.logger.info(log_pre + "SyncProcessingEvent(processing_id: %s)" % pr['processing_id'])
                             event = SyncProcessingEvent(publisher_id=self.id, processing_id=pr['processing_id'],
                                                         counter=original_event._counter)
+                            event.set_has_updates()
                             self.event_bus.send(event)
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
+            pro_ret = ReturnCode.Failed.value
         self.number_workers -= 1
+        return pro_ret
 
     def clean_locks(self):
         self.logger.info("clean locking")
@@ -413,6 +458,7 @@ class Poller(BaseAgent):
         """
         try:
             self.logger.info("Starting main thread")
+            self.init_thread_info()
 
             self.load_plugins()
             self.init()
@@ -421,7 +467,7 @@ class Poller(BaseAgent):
 
             self.init_event_function_map()
 
-            task = self.create_task(task_func=self.get_running_processings, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=60, priority=1)
+            task = self.create_task(task_func=self.get_running_processings, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=10, priority=1)
             self.add_task(task)
 
             task = self.create_task(task_func=self.clean_locks, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1800, priority=1)

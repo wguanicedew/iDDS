@@ -30,9 +30,15 @@ class Submitter(Poller):
     Submitter works to submit and running tasks to WFMS.
     """
 
-    def __init__(self, num_threads=1, poll_period=10, retries=3, retrieve_bulk_size=2,
+    def __init__(self, num_threads=1, max_number_workers=3, poll_period=10, retries=3, retrieve_bulk_size=2,
                  name='Submitter', message_bulk_size=1000, **kwargs):
-        super(Submitter, self).__init__(num_threads=num_threads, name=name, **kwargs)
+        self.max_number_workers = max_number_workers
+        self.set_max_workers()
+        num_threads = self.max_number_workers
+
+        super(Submitter, self).__init__(num_threads=num_threads, max_number_workers=self.max_number_workers,
+                                        name=name, retrieve_bulk_size=retrieve_bulk_size, **kwargs)
+        self.site_to_cloud = None
 
     def get_new_processings(self):
         """
@@ -54,10 +60,12 @@ class Submitter(Poller):
             if processings:
                 self.logger.info("Main thread get [new] processings to process: %s" % str(processings))
 
+            events = []
             for pr_id in processings:
                 self.logger.info("NewProcessingEvent(processing_id: %s)" % pr_id)
                 event = NewProcessingEvent(publisher_id=self.id, processing_id=pr_id)
-                self.event_bus.send(event)
+                events.append(event)
+            self.event_bus.send_bulk(events)
 
             return processings
         except exceptions.DatabaseException as ex:
@@ -69,6 +77,28 @@ class Submitter(Poller):
                 self.logger.error(traceback.format_exc())
         return []
 
+    def get_site_to_cloud(self, site, log_prefix=''):
+        try:
+            if self.site_to_cloud is None:
+                self.logger.debug(log_prefix + " agent_attributes: %s" % str(self.agent_attributes))
+                self.site_to_cloud = {}
+                if self.agent_attributes and 'domapandawork' in self.agent_attributes and self.agent_attributes['domapandawork']:
+                    if 'site_to_cloud' in self.agent_attributes['domapandawork'] and self.agent_attributes['domapandawork']['site_to_cloud']:
+                        site_to_clouds = self.agent_attributes['domapandawork']['site_to_cloud'].split(",")
+                        for site_to_cloud in site_to_clouds:
+                            local_site, cloud = site_to_cloud.split(':')
+                            if local_site not in self.site_to_cloud:
+                                self.site_to_cloud[local_site] = cloud
+                self.logger.debug(log_prefix + " site_to_cloud: %s" % self.site_to_cloud)
+
+            if site and self.site_to_cloud:
+                cloud = self.site_to_cloud.get(site, None)
+                self.logger.debug(log_prefix + "cloud for site(%s): %s" % (site, cloud))
+                return cloud
+        except Exception as ex:
+            self.logger.error(ex)
+        return None
+
     def handle_new_processing(self, processing):
         try:
             log_prefix = self.get_log_prefix(processing)
@@ -78,6 +108,8 @@ class Submitter(Poller):
             # work = transform['transform_metadata']['work']
             ret_new_processing = handle_new_processing(processing,
                                                        self.agent_attributes,
+                                                       func_site_to_cloud=self.get_site_to_cloud,
+                                                       max_updates_per_round=self.max_updates_per_round,
                                                        logger=self.logger,
                                                        log_prefix=log_prefix)
             status, processing, update_colls, new_contents, new_input_dependency_contents, msgs, errors = ret_new_processing
@@ -89,7 +121,7 @@ class Submitter(Poller):
                           'substatus': ProcessingStatus.Submitting,
                           'locking': ProcessingLocking.Idle,
                           'processing_metadata': processing['processing_metadata']}
-            parameters = self.load_poll_period(processing, parameters)
+            parameters = self.load_poll_period(processing, parameters, new=True)
 
             proc = processing['processing_metadata']['processing']
             if proc.submitted_at:
@@ -156,10 +188,12 @@ class Submitter(Poller):
                     self.logger.info(log_pre + "UpdateTransformEvent(transform_id: %s)" % pr['transform_id'])
                     submit_event_content = {'event': 'submitted'}
                     event = UpdateTransformEvent(publisher_id=self.id, transform_id=pr['transform_id'], content=submit_event_content)
+                    event.set_has_updates()
                     self.event_bus.send(event)
 
                     self.logger.info(log_pre + "SyncProcessingEvent(processing_id: %s)" % pr['processing_id'])
                     event = SyncProcessingEvent(publisher_id=self.id, processing_id=pr['processing_id'])
+                    event.set_has_updates()
                     self.event_bus.send(event)
         except Exception as ex:
             self.logger.error(ex)
@@ -180,6 +214,7 @@ class Submitter(Poller):
         """
         try:
             self.logger.info("Starting main thread")
+            self.init_thread_info()
 
             self.load_plugins()
             self.init()
@@ -188,7 +223,7 @@ class Submitter(Poller):
 
             self.init_event_function_map()
 
-            task = self.create_task(task_func=self.get_new_processings, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=60, priority=1)
+            task = self.create_task(task_func=self.get_new_processings, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=10, priority=1)
             self.add_task(task)
 
             self.execute()

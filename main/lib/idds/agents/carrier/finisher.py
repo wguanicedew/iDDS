@@ -6,11 +6,12 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2022
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
 
+import time
 import traceback
 
-from idds.common.constants import (Sections, ProcessingStatus, ProcessingLocking)
+from idds.common.constants import (Sections, ReturnCode, ProcessingStatus, ProcessingLocking)
 from idds.common.utils import setup_logging, truncate_string
 from idds.agents.common.eventbus.event import (EventType,
                                                UpdateProcessingEvent,
@@ -30,12 +31,23 @@ class Finisher(Poller):
     Finisher works to submit and running tasks to WFMS.
     """
 
-    def __init__(self, num_threads=1, poll_time_period=10, retries=3, retrieve_bulk_size=2,
+    def __init__(self, num_threads=1, finisher_max_number_workers=None, max_number_workers=3, poll_time_period=10, retries=3, retrieve_bulk_size=2,
                  message_bulk_size=1000, **kwargs):
-        super(Finisher, self).__init__(num_threads=num_threads, name='Finisher',
+        if finisher_max_number_workers:
+            self.max_number_workers = int(finisher_max_number_workers)
+        else:
+            self.max_number_workers = int(max_number_workers)
+        self.set_max_workers()
+
+        num_threads = int(self.max_number_workers)
+
+        super(Finisher, self).__init__(num_threads=num_threads, max_number_workers=self.max_number_workers,
+                                       name='Finisher',
                                        poll_time_period=poll_time_period, retries=retries,
                                        retrieve_bulk_size=retrieve_bulk_size,
                                        message_bulk_size=message_bulk_size, **kwargs)
+        self.logger.info("num_threads: %s" % num_threads)
+
         self.config_section = Sections.Carrier
         self.poll_time_period = int(poll_time_period)
         self.retries = int(retries)
@@ -43,9 +55,13 @@ class Finisher(Poller):
         if hasattr(self, 'finisher_max_number_workers'):
             self.max_number_workers = int(self.finisher_max_number_workers)
 
+        self.show_queue_size_time = None
+
     def show_queue_size(self):
-        q_str = "number of processings: %s, max number of processings: %s" % (self.number_workers, self.max_number_workers)
-        self.logger.debug(q_str)
+        if self.show_queue_size_time is None or time.time() - self.show_queue_size_time >= 600:
+            self.show_queue_size_time = time.time()
+            q_str = "number of processings: %s, max number of processings: %s" % (self.number_workers, self.max_number_workers)
+            self.logger.debug(q_str)
 
     def handle_sync_processing(self, processing, log_prefix=""):
         """
@@ -76,18 +92,24 @@ class Finisher(Poller):
 
     def process_sync_processing(self, event):
         self.number_workers += 1
+        pro_ret = ReturnCode.Ok.value
         try:
             if event:
                 self.logger.info("process_sync_processing: event: %s" % event)
                 pr = self.get_processing(processing_id=event._processing_id, locking=True)
                 if not pr:
                     self.logger.error("Cannot find processing for event: %s" % str(event))
+                    pro_ret = ReturnCode.Locked.value
                 else:
                     log_pre = self.get_log_prefix(pr)
 
                     self.logger.info(log_pre + "process_sync_processing")
                     ret = self.handle_sync_processing(pr, log_prefix=log_pre)
-                    self.logger.info(log_pre + "process_sync_processing result: %s" % str(ret))
+                    ret_copy = {}
+                    for ret_key in ret:
+                        if ret_key != 'messages':
+                            ret_copy[ret_key] = ret[ret_key]
+                    self.logger.info(log_pre + "process_sync_processing result: %s" % str(ret_copy))
 
                     self.update_processing(ret, pr)
 
@@ -98,7 +120,9 @@ class Finisher(Poller):
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
+            pro_ret = ReturnCode.Failed.value
         self.number_workers -= 1
+        return pro_ret
 
     def handle_terminated_processing(self, processing, log_prefix=""):
         """
@@ -130,6 +154,7 @@ class Finisher(Poller):
 
     def process_terminated_processing(self, event):
         self.number_workers += 1
+        pro_ret = ReturnCode.Ok.value
         try:
             if event:
                 if event._counter > 3:
@@ -139,12 +164,17 @@ class Finisher(Poller):
                     pr = self.get_processing(processing_id=event._processing_id, locking=True)
                     if not pr:
                         self.logger.error("Cannot find processing for event: %s" % str(event))
+                        pro_ret = ReturnCode.Locked.value
                     else:
                         log_pre = self.get_log_prefix(pr)
 
                         self.logger.info(log_pre + "process_terminated_processing")
                         ret = self.handle_terminated_processing(pr, log_prefix=log_pre)
-                        self.logger.info(log_pre + "process_terminated_processing result: %s" % str(ret))
+                        ret_copy = {}
+                        for ret_key in ret:
+                            if ret_key != 'messages':
+                                ret_copy[ret_key] = ret[ret_key]
+                        self.logger.info(log_pre + "process_terminated_processing result: %s" % str(ret_copy))
 
                         self.update_processing(ret, pr)
                         self.logger.info(log_pre + "UpdateTransformEvent(transform_id: %s)" % pr['transform_id'])
@@ -155,11 +185,14 @@ class Finisher(Poller):
                             # some files are missing, poll it.
                             self.logger.info(log_pre + "UpdateProcessingEvent(processing_id: %s)" % pr['processing_id'])
                             event = UpdateProcessingEvent(publisher_id=self.id, processing_id=pr['processing_id'], counter=original_event._counter + 1)
+                            event.set_terminating()
                             self.event_bus.send(event)
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
+            pro_ret = ReturnCode.Failed.value
         self.number_workers -= 1
+        return pro_ret
 
     def handle_abort_processing(self, processing, log_prefix=""):
         """
@@ -192,6 +225,7 @@ class Finisher(Poller):
 
     def process_abort_processing(self, event):
         self.number_workers += 1
+        pro_ret = ReturnCode.Ok.value
         try:
             if event:
                 processing_status = [ProcessingStatus.Finished, ProcessingStatus.Failed,
@@ -203,6 +237,7 @@ class Finisher(Poller):
 
                 if not pr:
                     self.logger.error("Cannot find processing for event: %s" % str(event))
+                    pro_ret = ReturnCode.Locked.value
                 else:
                     log_pre = self.get_log_prefix(pr)
                     self.logger.info(log_pre + "process_abort_processing")
@@ -216,7 +251,12 @@ class Finisher(Poller):
                         self.update_processing(ret, pr)
                     elif pr:
                         ret = self.handle_abort_processing(pr, log_prefix=log_pre)
-                        self.logger.info(log_pre + "process_abort_processing result: %s" % str(ret))
+                        ret_copy = {}
+                        for ret_key in ret:
+                            if ret_key != 'messages':
+                                ret_copy[ret_key] = ret[ret_key]
+                        self.logger.info(log_pre + "process_abort_processing result: %s" % str(ret_copy))
+
                         self.update_processing(ret, pr)
                         self.logger.info(log_pre + "UpdateTransformEvent(transform_id: %s)" % pr['transform_id'])
                         event = UpdateTransformEvent(publisher_id=self.id, transform_id=pr['transform_id'], content=event._content)
@@ -224,7 +264,9 @@ class Finisher(Poller):
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
+            pro_ret = ReturnCode.Failed.value
         self.number_workers -= 1
+        return pro_ret
 
     def handle_resume_processing(self, processing, log_prefix=""):
         """
@@ -256,6 +298,7 @@ class Finisher(Poller):
 
     def process_resume_processing(self, event):
         self.number_workers += 1
+        pro_ret = ReturnCode.Ok.value
         try:
             if event:
                 processing_status = [ProcessingStatus.Finished]
@@ -264,6 +307,7 @@ class Finisher(Poller):
 
                 if not pr:
                     self.logger.error("Cannot find processing for event: %s" % str(event))
+                    pro_ret = ReturnCode.Locked.value
                 else:
                     log_pre = self.get_log_prefix(pr)
                     self.logger.info(log_pre + "process_resume_processing")
@@ -289,7 +333,9 @@ class Finisher(Poller):
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
+            pro_ret = ReturnCode.Failed.value
         self.number_workers -= 1
+        return pro_ret
 
     def init_event_function_map(self):
         self.event_func_map = {
@@ -317,6 +363,7 @@ class Finisher(Poller):
         """
         try:
             self.logger.info("Starting main thread")
+            self.init_thread_info()
 
             self.load_plugins()
             self.init()

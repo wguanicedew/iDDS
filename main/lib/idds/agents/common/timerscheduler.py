@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2020
+# - Wen Guan, <wen.guan@cern.ch>, 2020 - 2023
 
 
 import heapq
@@ -15,6 +15,39 @@ import traceback
 from concurrent import futures
 
 from .timertask import TimerTask
+
+
+class IDDSThreadPoolExecutor(futures.ThreadPoolExecutor):
+    def __init__(self, max_workers=None, thread_name_prefix='',
+                 initializer=None, initargs=()):
+        self.futures = []
+        self._lock = threading.RLock()
+        super(IDDSThreadPoolExecutor, self).__init__(max_workers=max_workers,
+                                                     thread_name_prefix=thread_name_prefix,
+                                                     initializer=initializer,
+                                                     initargs=initargs)
+
+    def submit(self, fn, *args, **kwargs):
+        future = super(IDDSThreadPoolExecutor, self).submit(fn, *args, **kwargs)
+        with self._lock:
+            self.futures.append(future)
+        return future
+
+    def get_max_workers(self):
+        return self._max_workers
+
+    def get_num_workers(self):
+        with self._lock:
+            for future in self.futures.copy():
+                if future.done():
+                    self.futures.remove(future)
+            return len(self.futures)
+
+    def has_free_workers(self):
+        return self.get_num_workers() < self._max_workers
+
+    def get_num_free_workers(self):
+        return self._max_workers - self.get_num_workers()
 
 
 class TimerScheduler(threading.Thread):
@@ -28,8 +61,12 @@ class TimerScheduler(threading.Thread):
         if self.num_threads < 1:
             self.num_threads = 1
         self.graceful_stop = threading.Event()
-        self.executors = futures.ThreadPoolExecutor(max_workers=self.num_threads,
-                                                    thread_name_prefix=name)
+        self.executors = IDDSThreadPoolExecutor(max_workers=self.num_threads,
+                                                thread_name_prefix=name)
+
+        self.executors_timer = IDDSThreadPoolExecutor(max_workers=1,
+                                                      thread_name_prefix=name + "_Timer")
+        self.timer_thread = None
 
         self._task_queue = []
         self._lock = threading.RLock()
@@ -73,22 +110,25 @@ class TimerScheduler(threading.Thread):
         task.execute()
         self.add_task(task)
 
-    def execute(self):
+    def execute_local(self):
         while not self.graceful_stop.is_set():
             try:
                 task = self.get_ready_task()
                 if task:
-                    self.executors.submit(self.execute_task, task)
+                    self.executors_timer.submit(self.execute_task, task)
                 else:
-                    self.graceful_stop.wait(1)
+                    self.graceful_stop.wait(0.0001)
             except Exception as error:
                 self.logger.critical("Caught an exception: %s\n%s" % (str(error), traceback.format_exc()))
+
+    def execute(self):
+        self.execute_local()
 
     def execute_once(self):
         try:
             task = self.get_ready_task()
             if task:
-                self.executors.submit(self.execute_task, task)
+                self.executors_timer.submit(self.execute_task, task)
         except Exception as error:
             self.logger.critical("Caught an exception: %s\n%s" % (str(error), traceback.format_exc()))
 
@@ -96,6 +136,11 @@ class TimerScheduler(threading.Thread):
         try:
             task = self.get_ready_task()
             if task:
-                self.executors.submit(self.execute_task, task)
+                self.executors_timer.submit(self.execute_task, task)
         except Exception as error:
             self.logger.critical("Caught an exception: %s\n%s" % (str(error), traceback.format_exc()))
+
+    def execute_timer_schedule_thread(self):
+        if self.timer_thread is None:
+            self.timer_thread = threading.Thread(target=self.execute_local)
+            self.timer_thread.start()

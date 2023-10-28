@@ -6,9 +6,10 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2021
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
 
 
+import errno
 import datetime
 import logging
 import json
@@ -18,6 +19,7 @@ import requests
 import subprocess
 import sys
 import tarfile
+import time
 # import traceback
 
 from enum import Enum
@@ -37,6 +39,12 @@ from idds.common.exceptions import IDDSException
 
 # RFC 1123
 DATE_FORMAT = '%a, %d %b %Y %H:%M:%S UTC'
+
+
+def get_log_dir():
+    if config_has_section('common') and config_has_option('common', 'logdir'):
+        return config_get('common', 'logdir')
+    return "/var/log/idds"
 
 
 def setup_logging(name, stream=None, loglevel=None):
@@ -66,6 +74,7 @@ def setup_logging(name, stream=None, loglevel=None):
     else:
         logging.basicConfig(stream=stream, level=loglevel,
                             format='%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s')
+    logging.Formatter.converter = time.gmtime
 
 
 def get_logger(name, filename=None, loglevel=None):
@@ -523,3 +532,80 @@ def extract_scope_atlas(did, scopes):
 def truncate_string(string, length=800):
     string = (string[:length] + '...') if string and len(string) > length else string
     return string
+
+
+def merge_dict(dict1, dict2):
+    keys = list(dict1.keys())
+    for key in list(dict2.keys()):
+        if key not in keys:
+            keys.append(key)
+    for key in keys:
+        if key in dict2:
+            if key not in dict1 or dict1[key] is None:
+                dict1[key] = dict2[key]
+            else:
+                if dict2[key] is None:
+                    continue
+                elif not isinstance(dict1[key], type(dict2[key])):
+                    raise Exception("type of %s is different from %s, cannot merge" % (type(dict1[key]), type(dict2[key])))
+                elif dict1[key] == dict2[key]:
+                    continue
+                elif type(dict1[key]) in (list, tuple, str):
+                    dict1[key] = dict1[key] + dict2[key]
+                elif type(dict1[key]) in (int, float, complex):
+                    dict1[key] = dict1[key] + dict2[key]
+                elif type(dict1[key]) in (bool, bool):
+                    dict1[key] = True
+                elif type(dict1[key]) in (dict, dict):
+                    dict1[key] = merge_dict(dict1[key], dict2[key])
+    return dict1
+
+
+def pid_exists(pid):
+    """
+    Check whether pid exists in the current process table.
+    UNIX only.
+    """
+    if pid < 0:
+        return False
+    if pid == 0:
+        # According to "man 2 kill" PID 0 refers to every process
+        # in the process group of the calling process.
+        # On certain systems 0 is a valid PID but we have no way
+        # to know that in a portable fashion.
+        raise ValueError('invalid PID 0')
+    try:
+        os.kill(pid, 0)
+    except OSError as err:
+        if err.errno == errno.ESRCH:
+            # ESRCH == No such process
+            return False
+        elif err.errno == errno.EPERM:
+            # EPERM clearly means there's a process to deny access to
+            return True
+        else:
+            # According to "man 2 kill" possible error values are
+            # (EINVAL, EPERM, ESRCH)
+            raise
+    else:
+        return True
+
+
+def get_list_chunks(full_list, bulk_size=2000):
+    chunks = [full_list[i:i + bulk_size] for i in range(0, len(full_list), bulk_size)]
+    return chunks
+
+
+def report_availability(availability):
+    try:
+        log_dir = get_log_dir()
+        if log_dir:
+            filename = os.path.join(log_dir, 'idds_availability')
+            with open(filename, 'w') as f:
+                json.dump(availability, f)
+        else:
+            print("availability: %s" % str(availability))
+    except Exception as ex:
+        error = "Failed to report availablity: %s" % str(ex)
+        print(error)
+        logging.debug(error)

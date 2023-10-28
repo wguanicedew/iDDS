@@ -25,6 +25,14 @@ elif [ -f /opt/idds/certs/hostkey.pem ]; then
     ln -fs /opt/idds/certs/hostcert.pem /etc/grid-security/hostcert.pem
     chmod 600 /etc/grid-security/hostkey.pem
 fi
+# setup intermediate certificate
+if [ ! -f /etc/grid-security/chain.pem ]; then
+  if [ -f /opt/idds/certs/chain.pem ]; then
+    ln -fs /opt/idds/certs/chain.pem /etc/grid-security/chain.pem
+  elif [ -f /etc/grid-security/hostcert.pem ]; then
+    ln -fs /etc/grid-security/hostcert.pem /etc/grid-security/chain.pem
+  fi
+fi
 
 if [ -f /opt/idds/config/idds/idds.cfg ]; then
     echo "idds.cfg already mounted."
@@ -122,9 +130,14 @@ if [ -f /opt/idds/config/idds/supervisord_idds.ini ]; then
 else
     echo "supervisord conf not found. will use the default one."
     cp /opt/idds/config_default/supervisord_idds.ini /opt/idds/config/idds/supervisord_idds.ini
-    cp /opt/idds/config_default/supervisord_iddsfake.ini /opt/idds/config/idds/supervisord_iddsfake.ini
+    # cp /opt/idds/config_default/supervisord_iddsfake.ini /opt/idds/config/idds/supervisord_iddsfake.ini
     cp /opt/idds/config_default/supervisord_httpd.ini /opt/idds/config/idds/supervisord_httpd.ini
-    cp /opt/idds/config_default/supervisord_syslog-ng.ini /opt/idds/config/idds/supervisord_syslog-ng.ini
+    # cp /opt/idds/config_default/supervisord_syslog-ng.ini /opt/idds/config/idds/supervisord_syslog-ng.ini
+
+    cp /opt/idds/config_default/supervisord_logrotate.ini /opt/idds/config/idds/supervisord_logrotate.ini
+    cp /opt/idds/config_default/logrotate_idds /opt/idds/config/idds/logrotate_idds
+    cp /opt/idds/config_default/logrotate_daemon /opt/idds/config/idds/logrotate_daemon
+    chmod +x /opt/idds/config/idds/logrotate_daemon
 fi
 
 if [ -f /etc/grid-security/hostkey.pem ]; then
@@ -169,7 +182,7 @@ fi
 # create database if not exists
 python /opt/idds/tools/env/create_database.py
 # upgrade database
-alembic upgrade head
+alembic upgrade heads
 
 # configure monitor
 python /opt/idds/tools/env/config_monitor.py -s ${IDDS_HOME}/monitor/data/conf.js.template -d ${IDDS_HOME}/monitor/data/conf.js  --host ${IDDS_SERVER}
@@ -181,15 +194,26 @@ if ! [ -f /opt/idds/config/.token ]; then
     fi
 fi
 
+# fetch-crl cron
+cronExec=/opt/idds/cronExec
+cat <<EOT >> ${cronExec}
+while true; do /usr/sbin/fetch-crl; sleep 36000; done &
+EOT
+chmod +x ${cronExec}
+bash ${cronExec}
+
 # start redis
-mkdir /var/log/idds/redis
-if [ ! -f /var/log/redis ]; then
+mkdir -p /var/log/idds/redis
+if [ ! -h /var/log/redis ]; then
     ln -s /var/log/idds/redis /var/log/redis
 fi
-if [ ! -f /var/lib/redis ]; then
+if [ ! -h /var/lib/redis ]; then
     ln -s /var/log/idds/redis /var/lib/redis
 fi
-/usr/bin/redis-server /etc/redis.conf --supervised systemd &
+/usr/bin/redis-server /etc/redis/redis.conf --supervised systemd &
+
+echo "clean heartbeats"
+python /opt/idds/tools/env/clean_heartbeat.py
 
 if [ "${IDDS_SERVICE}" == "rest" ]; then
   echo "starting iDDS ${IDDS_SERVICE} service"
@@ -215,7 +239,7 @@ fi
 
 # echo "start syslog-ng"
 # /usr/sbin/syslog-ng -F --no-caps --persist-file=/var/log/idds/syslog-ng.persist -p /var/log/idds/syslog-ng.pid
-tail -f -F /var/log/idds/syslog-ng-stdout.log &
-tail -f -F /var/log/idds/syslog-ng-stderr.log &
+# tail -f -F /var/log/idds/syslog-ng-stdout.log &
+# tail -f -F /var/log/idds/syslog-ng-stderr.log &
 
 trap : TERM INT; sleep infinity & wait

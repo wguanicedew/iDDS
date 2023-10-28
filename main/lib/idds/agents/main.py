@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
 
 """
 Main start entry point for iDDS service
@@ -20,7 +20,7 @@ import traceback
 
 from idds.common.constants import Sections
 from idds.common.config import config_has_section, config_has_option, config_list_options, config_get
-from idds.common.utils import setup_logging
+from idds.common.utils import setup_logging, report_availability
 
 
 setup_logging('idds.log')
@@ -38,7 +38,9 @@ AGENTS = {
     'trigger': ['idds.agents.carrier.trigger.Trigger', Sections.Carrier],
     'finisher': ['idds.agents.carrier.finisher.Finisher', Sections.Carrier],
     'conductor': ['idds.agents.conductor.conductor.Conductor', Sections.Conductor],
-    'consumer': ['idds.agents.conductor.consumer.Consumer', Sections.Consumer]
+    'consumer': ['idds.agents.conductor.consumer.Consumer', Sections.Consumer],
+    'archiver': ['idds.agents.archive.archiver.Archiver', Sections.Archiver],
+    'coordinator': ['idds.agents.coordinator.coordinator.Coordinator', Sections.Coordinator]
 }
 
 RUNNING_AGENTS = []
@@ -101,6 +103,7 @@ def run_agents():
     for agent in RUNNING_AGENTS:
         agent.start()
 
+    current = None
     while len(RUNNING_AGENTS):
         [thr.join(timeout=3.14) for thr in RUNNING_AGENTS if thr and thr.is_alive()]
         RUNNING_AGENTS = [thr for thr in RUNNING_AGENTS if thr and thr.is_alive()]
@@ -108,6 +111,15 @@ def run_agents():
             logging.critical("Number of active agents(%s) is not equal number of agents should run(%s)" % (len(RUNNING_AGENTS), len(agents)))
             logging.critical("Exit main run loop.")
             break
+
+        if current is None or time.time() - current > 600:
+            # select one agent to get the health items
+            candidate = RUNNING_AGENTS[0]
+            availability = candidate.get_availability()
+            logging.debug("availability: %s" % availability)
+            report_availability(availability)
+
+            current = time.time()
 
 
 def stop(signum=None, frame=None):

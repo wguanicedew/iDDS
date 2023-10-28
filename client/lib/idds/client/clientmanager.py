@@ -31,7 +31,7 @@ except ImportError:
     raw_input = input
 
 
-from idds.common.authentication import OIDCAuthenticationUtils
+from idds.common.authentication import OIDCAuthentication, OIDCAuthenticationUtils
 from idds.common.utils import setup_logging, get_proxy_path
 
 from idds.client.version import release_version
@@ -316,6 +316,27 @@ class ClientManager:
             else:
                 logging.info("Failed to save token to %s: (status: %s, output: %s)" % (self.oidc_token_file, status, output))
 
+    def setup_oidc_client_token(self, issuer, client_id, client_secret, scope, audience):
+        """"
+        Setup oidc client token
+        """
+        self.setup_client(auth_setup=True)
+        oidc_auth = OIDCAuthentication()
+        status, token = oidc_auth.setup_oidc_client_token(issuer=issuer, client_id=client_id,
+                                                          client_secret=client_secret, scope=scope,
+                                                          audience=audience)
+
+        if not status:
+            logging.error("Failed to get token.")
+        else:
+            oidc_util = OIDCAuthenticationUtils()
+            token_file = self.oidc_token_file + "_client"
+            status, output = oidc_util.save_token(token_file, token)
+            if status:
+                logging.info("Token is saved to %s" % (token_file))
+            else:
+                logging.info("Failed to save token to %s: (status: %s, output: %s)" % (token_file, status, output))
+
     def refresh_oidc_token(self):
         """"
         refresh oidc token
@@ -402,7 +423,7 @@ class ClientManager:
         return status
 
     @exception_handler
-    def submit(self, workflow, username=None, userdn=None, use_dataset_name=True):
+    def submit(self, workflow, username=None, userdn=None, use_dataset_name=False):
         """
         Submit the workflow as a request to iDDS server.
 
@@ -433,7 +454,7 @@ class ClientManager:
         if self.auth_type == 'x509_proxy':
             workflow.add_proxy()
 
-        if use_dataset_name:
+        if use_dataset_name or not workflow.name:
             primary_init_work = workflow.get_primary_initial_collection()
             if primary_init_work:
                 if type(primary_init_work) in [Collection, CollectionV1]:

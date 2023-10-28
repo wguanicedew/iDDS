@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2022
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
 
 import copy
 import datetime
@@ -15,7 +15,8 @@ import time
 import traceback
 
 from idds.common import exceptions
-from idds.common.constants import (Sections, TransformStatus, TransformLocking,
+from idds.common.constants import (Sections, ReturnCode,
+                                   TransformStatus, TransformLocking,
                                    CommandType, ProcessingStatus)
 from idds.common.utils import setup_logging, truncate_string
 from idds.core import (transforms as core_transforms,
@@ -38,8 +39,11 @@ class Transformer(BaseAgent):
     Transformer works to process transforms.
     """
 
-    def __init__(self, num_threads=1, poll_period=1800, retries=3, retrieve_bulk_size=10,
+    def __init__(self, num_threads=1, max_number_workers=8, poll_period=1800, retries=3, retrieve_bulk_size=10,
                  message_bulk_size=10000, **kwargs):
+        self.max_number_workers = max_number_workers
+        self.set_max_workers()
+        num_threads = self.max_number_workers
         super(Transformer, self).__init__(num_threads=num_threads, name='Transformer', **kwargs)
         self.config_section = Sections.Transformer
         self.poll_period = int(poll_period)
@@ -85,13 +89,16 @@ class Transformer(BaseAgent):
         else:
             self.max_number_workers = int(self.max_number_workers)
 
+        self.show_queue_size_time = None
+
     def is_ok_to_run_more_transforms(self):
         if self.number_workers >= self.max_number_workers:
             return False
         return True
 
     def show_queue_size(self):
-        if self.number_workers > 0:
+        if self.show_queue_size_time is None or time.time() - self.show_queue_size_time >= 600:
+            self.show_queue_size_time = time.time()
             q_str = "number of transforms: %s, max number of transforms: %s" % (self.number_workers, self.max_number_workers)
             self.logger.debug(q_str)
 
@@ -116,9 +123,11 @@ class Transformer(BaseAgent):
             if transforms_new:
                 self.logger.info("Main thread get New+Ready+Extend transforms to process: %s" % str(transforms_new))
 
+            events = []
             for tf_id in transforms_new:
                 event = NewTransformEvent(publisher_id=self.id, transform_id=tf_id)
-                self.event_bus.send(event)
+                events.append(event)
+            self.event_bus.send_bulk(events)
 
             return transforms_new
         except exceptions.DatabaseException as ex:
@@ -157,9 +166,11 @@ class Transformer(BaseAgent):
             if transforms:
                 self.logger.info("Main thread get transforming transforms to process: %s" % str(transforms))
 
+            events = []
             for tf_id in transforms:
                 event = UpdateTransformEvent(publisher_id=self.id, transform_id=tf_id)
-                self.event_bus.send(event)
+                events.append(event)
+            self.event_bus.send_bulk(events)
 
             return transforms
         except exceptions.DatabaseException as ex:
@@ -523,17 +534,20 @@ class Transformer(BaseAgent):
 
     def process_update_transform(self, event):
         self.number_workers += 1
+        pro_ret = ReturnCode.Ok.value
         try:
             if event:
-                tf_status = [TransformStatus.Transforming,
-                             TransformStatus.ToCancel, TransformStatus.Cancelling,
-                             TransformStatus.ToSuspend, TransformStatus.Suspending,
-                             TransformStatus.ToExpire, TransformStatus.Expiring,
-                             TransformStatus.ToResume, TransformStatus.Resuming,
-                             TransformStatus.ToFinish, TransformStatus.ToForceFinish]
-                tf = self.get_transform(transform_id=event._transform_id, status=tf_status, locking=True)
+                # tf_status = [TransformStatus.Transforming,
+                #              TransformStatus.ToCancel, TransformStatus.Cancelling,
+                #              TransformStatus.ToSuspend, TransformStatus.Suspending,
+                #              TransformStatus.ToExpire, TransformStatus.Expiring,
+                #              TransformStatus.ToResume, TransformStatus.Resuming,
+                #              TransformStatus.ToFinish, TransformStatus.ToForceFinish]
+                # tf = self.get_transform(transform_id=event._transform_id, status=tf_status, locking=True)
+                tf = self.get_transform(transform_id=event._transform_id, locking=True)
                 if not tf:
                     self.logger.error("Cannot find transform for event: %s" % str(event))
+                    pro_ret = ReturnCode.Locked.value
                 else:
                     log_pre = self.get_log_prefix(tf)
 
@@ -559,7 +573,9 @@ class Transformer(BaseAgent):
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
+            pro_ret = ReturnCode.Failed.value
         self.number_workers -= 1
+        return pro_ret
 
     def handle_abort_transform(self, transform):
         """
@@ -598,12 +614,14 @@ class Transformer(BaseAgent):
 
     def process_abort_transform(self, event):
         self.number_workers += 1
+        pro_ret = ReturnCode.Ok.value
         try:
             if event:
                 self.logger.info("process_abort_transform: event: %s" % event)
                 tf = self.get_transform(transform_id=event._transform_id, locking=True)
                 if not tf:
                     self.logger.error("Cannot find transform for event: %s" % str(event))
+                    pro_ret = ReturnCode.Locked.value
                 else:
                     log_pre = self.get_log_prefix(tf)
                     self.logger.info(log_pre + "process_abort_transform")
@@ -638,7 +656,9 @@ class Transformer(BaseAgent):
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
+            pro_ret = ReturnCode.Failed.value
         self.number_workers -= 1
+        return pro_ret
 
     def handle_resume_transform(self, transform):
         """
@@ -670,12 +690,14 @@ class Transformer(BaseAgent):
 
     def process_resume_transform(self, event):
         self.number_workers += 1
+        pro_ret = ReturnCode.Ok.value
         try:
             if event:
                 self.logger.info("process_resume_transform: event: %s" % event)
                 tf = self.get_transform(transform_id=event._transform_id, locking=True)
                 if not tf:
                     self.logger.error("Cannot find transform for event: %s" % str(event))
+                    pro_ret = ReturnCode.Locked.value
                 else:
                     log_pre = self.get_log_prefix(tf)
 
@@ -713,7 +735,9 @@ class Transformer(BaseAgent):
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
+            pro_ret = ReturnCode.Failed.value
         self.number_workers -= 1
+        return pro_ret
 
     def clean_locks(self):
         self.logger.info("clean locking")
@@ -745,6 +769,7 @@ class Transformer(BaseAgent):
         """
         try:
             self.logger.info("Starting main thread")
+            self.init_thread_info()
 
             self.load_plugins()
 
@@ -752,9 +777,9 @@ class Transformer(BaseAgent):
 
             self.init_event_function_map()
 
-            task = self.create_task(task_func=self.get_new_transforms, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=60, priority=1)
+            task = self.create_task(task_func=self.get_new_transforms, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=10, priority=1)
             self.add_task(task)
-            task = self.create_task(task_func=self.get_running_transforms, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=60, priority=1)
+            task = self.create_task(task_func=self.get_running_transforms, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=10, priority=1)
             self.add_task(task)
             task = self.create_task(task_func=self.clean_locks, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1800, priority=1)
             self.add_task(task)

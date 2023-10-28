@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
 
 
 """
@@ -17,7 +17,7 @@ import datetime
 import re
 import copy
 
-from sqlalchemy import or_
+from sqlalchemy import or_, asc
 from sqlalchemy.exc import DatabaseError, IntegrityError
 
 from idds.common import exceptions
@@ -117,8 +117,8 @@ def update_messages(messages, bulk_size=1000, session=None):
 @read_session
 def retrieve_messages(bulk_size=1000, msg_type=None, status=None, source=None,
                       destination=None, request_id=None, workload_id=None,
-                      transform_id=None, processing_id=None,
-                      retries=None, delay=None, session=None):
+                      transform_id=None, processing_id=None, fetching_id=None,
+                      use_poll_period=False, retries=None, delay=None, session=None):
     """
     Retrieve up to $bulk messages.
 
@@ -137,19 +137,16 @@ def retrieve_messages(bulk_size=1000, msg_type=None, status=None, source=None,
                 destination = [destination]
             if len(destination) == 1:
                 destination = [destination[0], destination[0]]
+        if msg_type is not None:
+            if not isinstance(msg_type, (list, tuple)):
+                msg_type = [msg_type]
+            if len(msg_type) == 1:
+                msg_type = [msg_type[0], msg_type[0]]
 
         query = session.query(models.Message)
-        if request_id is not None:
-            query = query.with_hint(models.Message, "INDEX(MESSAGES MESSAGES_TYPE_ST_IDX)", 'oracle')
-        elif transform_id:
-            query = query.with_hint(models.Message, "INDEX(MESSAGES MESSAGES_TYPE_ST_TF_IDX)", 'oracle')
-        elif processing_id is not None:
-            query = query.with_hint(models.Message, "INDEX(MESSAGES MESSAGES_TYPE_ST_PR_IDX)", 'oracle')
-        else:
-            query = query.with_hint(models.Message, "INDEX(MESSAGES MESSAGES_TYPE_ST_IDX)", 'oracle')
 
         if msg_type is not None:
-            query = query.filter_by(msg_type=msg_type)
+            query = query.filter(models.Message.msg_type.in_(msg_type))
         if status is not None:
             query = query.filter_by(status=status)
         if source is not None:
@@ -168,6 +165,10 @@ def retrieve_messages(bulk_size=1000, msg_type=None, status=None, source=None,
             query = query.filter_by(retries=retries)
         if delay:
             query = query.filter(models.Message.updated_at < datetime.datetime.utcnow() - datetime.timedelta(seconds=delay))
+        elif use_poll_period:
+            query = query.filter(models.Message.updated_at + models.Message.poll_period <= datetime.datetime.utcnow())
+
+        query = query.order_by(asc(models.Message.updated_at))
 
         if bulk_size:
             query = query.order_by(models.Message.created_at).limit(bulk_size)
@@ -176,7 +177,8 @@ def retrieve_messages(bulk_size=1000, msg_type=None, status=None, source=None,
         tmp = query.all()
         if tmp:
             for t in tmp:
-                messages.append(t.to_dict())
+                message = t.to_dict()
+                messages.append(message)
         return messages
     except IntegrityError as e:
         raise exceptions.DatabaseException(e.args)
@@ -196,12 +198,22 @@ def delete_messages(messages, session=None):
     try:
         if message_condition:
             session.query(models.Message).\
-                with_hint(models.Message, "index(messages MESSAGES_PK)", 'oracle').\
                 filter(or_(*message_condition)).\
                 delete(synchronize_session=False)
     except IntegrityError as e:
         raise exceptions.DatabaseException(e.args)
 
+
+@transactional_session
+def clean_old_messages(request_id, session=None):
+    """
+    Delete messages whose request id is older than request_id.
+
+    :param request_id: request id..
+    """
+    session.query(models.Message)\
+           .filter(models.Message.request_id <= request_id)\
+           .delete(synchronize_session=False)
 
 # @transactional_session
 # def update_messages(messages, session=None):

@@ -15,6 +15,8 @@ import jwt
 import os
 import re
 import requests
+import time
+
 
 try:
     import ConfigParser
@@ -45,20 +47,59 @@ def decode_value(val):
     return int.from_bytes(decoded, 'big')
 
 
-def should_verify():
+def should_verify(no_verify=False, ssl_verify=None):
+    if no_verify:
+        return False
     if os.environ.get('IDDS_AUTH_NO_VERIFY', None):
         return False
+
+    if os.environ.get('IDDS_AUTH_SSL_VERIFY', None):
+        return os.environ.get('IDDS_AUTH_SSL_VERIFY', None)
+
+    if ssl_verify:
+        return ssl_verify
+
     return True
 
 
-class BaseAuthentication(object):
+class Singleton(object):
+    _instance = None
+
+    def __new__(class_, *args, **kwargs):
+        if not isinstance(class_._instance, class_):
+            class_._instance = object.__new__(class_, *args, **kwargs)
+            class_._instance._initialized = False
+        return class_._instance
+
+
+class BaseAuthentication(Singleton):
     def __init__(self, timeout=None):
         self.timeout = timeout
         self.config = self.load_auth_server_config()
         self.max_expires_in = 60
+
+        self.cache = {}
+        self.cache_time = 3600 * 6
+
         if self.config and self.config.has_section('common'):
             if self.config.has_option('common', 'max_expires_in'):
                 self.max_expires_in = self.config.getint('common', 'max_expires_in')
+
+        if self.config and self.config.has_section('common'):
+            if self.config.has_option('common', 'cache_time'):
+                self.cache_time = self.config.getint('common', 'cache_time')
+
+    def get_cache_value(self, key):
+        if key in self.cache and self.cache[key]['time'] + self.cache_time > time.time():
+            return self.cache[key]['value']
+        return None
+
+    def set_cache_value(self, key, value):
+        cache_keys = list(self.cache.keys())
+        for k in cache_keys:
+            if self.cache[k]['time'] + self.cache_time <= time.time():
+                del self.cache[k]
+        self.cache[key] = {'time': time.time(), 'value': value}
 
     def load_auth_server_config(self):
         config = ConfigParser.ConfigParser()
@@ -87,42 +128,69 @@ class BaseAuthentication(object):
                     allow_vos.append(t)
         return allow_vos
 
+    def get_ssl_verify(self):
+        section = 'common'
+        ssl_verify = None
+        if self.config and self.config.has_section(section):
+            if self.config.has_option(section, 'ssl_verify'):
+                ssl_verify = self.config.get(section, 'ssl_verify')
+        return ssl_verify
+
 
 class OIDCAuthentication(BaseAuthentication):
     def __init__(self, timeout=None):
         super(OIDCAuthentication, self).__init__(timeout=timeout)
 
     def get_auth_config(self, vo):
+        ret = self.get_cache_value(vo)
+        if ret:
+            return ret
+
         ret = {'vo': vo, 'oidc_config_url': None, 'client_id': None,
-               'client_secret': None, 'audience': None}
+               'client_secret': None, 'audience': None, 'no_verify': False}
 
         if self.config and self.config.has_section(vo):
             for name in ['oidc_config_url', 'client_id', 'client_secret', 'vo', 'audience']:
                 if self.config.has_option(vo, name):
                     ret[name] = self.config.get(vo, name)
+            for name in ['no_verify']:
+                if self.config.has_option(vo, name):
+                    ret[name] = self.config.getboolean(vo, name)
         return ret
 
-    def get_http_content(self, url):
+    def get_http_content(self, url, no_verify=False):
         try:
-            r = requests.get(url, allow_redirects=True, verify=should_verify())
+            r = requests.get(url, allow_redirects=True, verify=should_verify(no_verify, self.get_ssl_verify()))
             return r.content
         except Exception as error:
             return False, 'Failed to get http content for %s: %s' (str(url), str(error))
 
     def get_endpoint_config(self, auth_config):
-        content = self.get_http_content(auth_config['oidc_config_url'])
+        content = self.get_http_content(auth_config['oidc_config_url'], no_verify=auth_config['no_verify'])
         endpoint_config = json.loads(content)
         # ret = {'token_endpoint': , 'device_authorization_endpoint': None}
         return endpoint_config
 
-    def get_oidc_sign_url(self, vo):
-        try:
+    def get_auth_endpoint_config(self, vo):
+        auth_config = self.get_cache_value(vo)
+        endpoint_config_key = vo + "_endpoint_config"
+        endpoint_config = self.get_cache_value(endpoint_config_key)
+
+        if not auth_config or not endpoint_config:
             allow_vos = self.get_allow_vos()
             if vo not in allow_vos:
                 return False, "VO %s is not allowed." % vo
 
             auth_config = self.get_auth_config(vo)
             endpoint_config = self.get_endpoint_config(auth_config)
+
+            self.set_cache_value(vo, auth_config)
+            self.set_cache_value(endpoint_config_key, endpoint_config)
+        return auth_config, endpoint_config
+
+    def get_oidc_sign_url(self, vo):
+        try:
+            auth_config, endpoint_config = self.get_auth_endpoint_config(vo)
 
             data = {'client_id': auth_config['client_id'],
                     'scope': "openid profile email offline_access",
@@ -134,7 +202,7 @@ class OIDCAuthentication(BaseAuthentication):
                                              # data=json.dumps(data),
                                              urlencode(data).encode(),
                                              timeout=self.timeout,
-                                             verify=should_verify(),
+                                             verify=should_verify(auth_config['no_verify'], self.get_ssl_verify()),
                                              headers=headers)
 
             if result is not None:
@@ -151,12 +219,7 @@ class OIDCAuthentication(BaseAuthentication):
 
     def get_id_token(self, vo, device_code, interval=5, expires_in=60):
         try:
-            allow_vos = self.get_allow_vos()
-            if vo not in allow_vos:
-                return False, "VO %s is not allowed." % vo
-
-            auth_config = self.get_auth_config(vo)
-            endpoint_config = self.get_endpoint_config(auth_config)
+            auth_config, endpoint_config = self.get_auth_endpoint_config(vo)
 
             data = {'client_id': auth_config['client_id'],
                     'client_secret': auth_config['client_secret'],
@@ -179,7 +242,7 @@ class OIDCAuthentication(BaseAuthentication):
                                              # data=json.dumps(data),
                                              urlencode(data).encode(),
                                              timeout=self.timeout,
-                                             verify=should_verify(),
+                                             verify=should_verify(auth_config['no_verify'], self.get_ssl_verify()),
                                              headers=headers)
             if result is not None:
                 if result.status_code == HTTP_STATUS_CODE.OK and result.text:
@@ -193,12 +256,7 @@ class OIDCAuthentication(BaseAuthentication):
 
     def refresh_id_token(self, vo, refresh_token):
         try:
-            allow_vos = self.get_allow_vos()
-            if vo not in allow_vos:
-                return False, "VO %s is not allowed." % vo
-
-            auth_config = self.get_auth_config(vo)
-            endpoint_config = self.get_endpoint_config(auth_config)
+            auth_config, endpoint_config = self.get_auth_endpoint_config(vo)
 
             data = {'client_id': auth_config['client_id'],
                     'client_secret': auth_config['client_secret'],
@@ -211,7 +269,7 @@ class OIDCAuthentication(BaseAuthentication):
                                              # data=json.dumps(data),
                                              urlencode(data).encode(),
                                              timeout=self.timeout,
-                                             verify=should_verify(),
+                                             verify=should_verify(auth_config['no_verify'], self.get_ssl_verify()),
                                              headers=headers)
 
             if result is not None:
@@ -226,14 +284,18 @@ class OIDCAuthentication(BaseAuthentication):
         except Exception as error:
             return False, 'Failed to refresh oidc token: ' + str(error)
 
-    def get_public_key(self, token, jwks_uri):
+    def get_public_key(self, token, jwks_uri, no_verify=False):
         headers = jwt.get_unverified_header(token)
         if headers is None or 'kid' not in headers:
             raise jwt.exceptions.InvalidTokenError('cannot extract kid from headers')
         kid = headers['kid']
 
-        jwks_content = self.get_http_content(jwks_uri)
-        jwks = json.loads(jwks_content)
+        jwks = self.get_cache_value(jwks_uri)
+        if not jwks:
+            jwks_content = self.get_http_content(jwks_uri, no_verify=no_verify)
+            jwks = json.loads(jwks_content)
+            self.set_cache_value(jwks_uri, jwks)
+
         jwk = None
         for j in jwks.get('keys', []):
             if j.get('kid') == kid:
@@ -248,12 +310,7 @@ class OIDCAuthentication(BaseAuthentication):
 
     def verify_id_token(self, vo, token):
         try:
-            allow_vos = self.get_allow_vos()
-            if vo not in allow_vos:
-                return False, "VO %s is not allowed." % vo, None
-
-            auth_config = self.get_auth_config(vo)
-            endpoint_config = self.get_endpoint_config(auth_config)
+            auth_config, endpoint_config = self.get_auth_endpoint_config(vo)
 
             # check audience
             decoded_token = jwt.decode(token, verify=False, options={"verify_signature": False})
@@ -262,7 +319,7 @@ class OIDCAuthentication(BaseAuthentication):
                 # discovery_endpoint = auth_config['oidc_config_url']
                 return False, "The audience %s of the token doesn't match vo configuration(client_id: %s)." % (audience, auth_config['client_id']), None
 
-            public_key = self.get_public_key(token, endpoint_config['jwks_uri'])
+            public_key = self.get_public_key(token, endpoint_config['jwks_uri'], no_verify=auth_config['no_verify'])
             # decode token only with RS256
             if 'iss' in decoded_token and decoded_token['iss'] and decoded_token['iss'] != endpoint_config['issuer'] and endpoint_config['issuer'].startswith(decoded_token['iss']):
                 # iss is missing the last '/' in access tokens
@@ -280,6 +337,41 @@ class OIDCAuthentication(BaseAuthentication):
             return True, decoded, username
         except Exception as error:
             return False, 'Failed to verify oidc token: ' + str(error), None
+
+    def setup_oidc_client_token(self, issuer, client_id, client_secret, scope, audience):
+        try:
+            data = {'client_id': client_id,
+                    'client_secret': client_secret,
+                    'grant_type': 'client_credentials',
+                    'scope': scope,
+                    'audience': audience}
+
+            headers = {'content-type': 'application/x-www-form-urlencoded'}
+
+            endpoint = '{0}/token'.format(issuer)
+            result = requests.session().post(endpoint,
+                                             # data=json.dumps(data),
+                                             # data=data,
+                                             urlencode(data).encode(),
+                                             timeout=self.timeout,
+                                             verify=should_verify(ssl_verify=self.get_ssl_verify()),
+                                             headers=headers)
+
+            if result is not None:
+                # print(result)
+                # print(result.text)
+                # print(result.status_code)
+
+                if result.status_code == HTTP_STATUS_CODE.OK and result.text:
+                    return True, json.loads(result.text)
+                else:
+                    return False, "Failed to refresh oidc token (status: %s, text: %s)" % (result.status_code, result.text)
+            else:
+                return False, "Failed to refresh oidc token. Response is None."
+        except requests.exceptions.ConnectionError as error:
+            return False, 'Failed to refresh oidc token. ConnectionError: ' + str(error)
+        except Exception as error:
+            return False, 'Failed to refresh oidc token: ' + str(error)
 
 
 class OIDCAuthenticationUtils(object):
@@ -384,6 +476,8 @@ def get_user_name_from_dn1(dn):
         username = up.sub('', dn)
         up2 = re.compile('/CN=[0-9]+')
         username = up2.sub('', username)
+        up2 = re.compile('/CN=[0-9]+')
+        username = up2.sub('', username)
         up3 = re.compile(' [0-9]+')
         username = up3.sub('', username)
         up4 = re.compile('_[0-9]+')
@@ -421,6 +515,8 @@ def get_user_name_from_dn2(dn):
         username = up.sub('', dn)
         up2 = re.compile(',CN=[0-9]+')
         username = up2.sub('', username)
+        up2 = re.compile('CN=[0-9]+,')
+        username = up2.sub(',', username)
         up3 = re.compile(' [0-9]+')
         username = up3.sub('', username)
         up4 = re.compile('_[0-9]+')
@@ -428,8 +524,11 @@ def get_user_name_from_dn2(dn):
         username = username.replace(',CN=proxy', '')
         username = username.replace(',CN=limited proxy', '')
         username = username.replace('limited proxy', '')
+        username = re.sub(',CN=Robot:[^/]+,', ',', username)
         username = re.sub(',CN=Robot:[^/]+', '', username)
+        username = re.sub(',CN=Robot[^/]+,', ',', username)
         username = re.sub(',CN=Robot[^/]+', '', username)
+        username = re.sub(',CN=nickname:[^/]+,', ',', username)
         username = re.sub(',CN=nickname:[^/]+', '', username)
         pat = re.compile('.*,CN=([^\,]+),CN=([^\,]+)')         # noqa W605
         mat = pat.match(username)

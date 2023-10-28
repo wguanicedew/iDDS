@@ -28,3 +28,8 @@ dependencies:
   - cryptography
   - redis
   - alembic
+  - deepdiff
+  - pyzmq
+  - anytree
+  - networkx
+  - oic

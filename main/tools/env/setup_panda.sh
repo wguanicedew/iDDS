@@ -37,6 +37,23 @@ elif [ "$instance" == "slac" ]; then
     export PANDA_AUTH_VO=Rubin
 
     export PANDACACHE_URL=$PANDA_URL_SSL
+    export PANDA_SYS=/afs/cern.ch/user/w/wguan/workdisk/iDDS/.conda/iDDS/
+
+    # export PANDA_CONFIG_ROOT=/afs/cern.ch/user/w/wguan/workdisk/iDDS/main/etc/panda/
+    export PANDA_CONFIG_ROOT=~/.panda/
+elif [ "$instance" == "usdf" ]; then
+    export PANDA_AUTH=oidc
+    export PANDA_BEHIND_REAL_LB=true
+    export PANDA_VERIFY_HOST=off
+    export PANDA_URL_SSL=https://usdf-panda-server.slac.stanford.edu:8443/server/panda
+    export PANDA_URL=https://usdf-panda-server.slac.stanford.edu:8443/server/panda
+    export PANDACACHE_URL=$PANDA_URL_SSL
+    export PANDAMON_URL=https://usdf-panda-bigmon.slac.stanford.edu:8443/
+    export PANDA_AUTH_VO=Rubin
+
+    export PANDACACHE_URL=$PANDA_URL_SSL
+    export PANDA_SYS=/afs/cern.ch/user/w/wguan/workdisk/iDDS/.conda/iDDS/
+
     # export PANDA_CONFIG_ROOT=/afs/cern.ch/user/w/wguan/workdisk/iDDS/main/etc/panda/
     export PANDA_CONFIG_ROOT=~/.panda/
 else
@@ -44,8 +61,9 @@ else
     export PANDA_URL_SSL=https://pandaserver-doma.cern.ch:25443/server/panda
     export PANDA_URL=http://pandaserver-doma.cern.ch:25080/server/panda
     export PANDAMON_URL=https://panda-doma.cern.ch
-    export PANDA_AUTH_VO=panda_dev
-    
+    # export PANDA_AUTH_VO=panda_dev
+    export PANDA_AUTH_VO=Rubin:production
+
     export PANDACACHE_URL=$PANDA_URL_SSL
 
     export PANDA_SYS=/afs/cern.ch/user/w/wguan/workdisk/iDDS/.conda/iDDS/

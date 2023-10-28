@@ -331,7 +331,7 @@ def get_contents(coll_scope=None, coll_name=None, request_id=None, workload_id=N
 
 
 @read_session
-def get_contents_by_request_transform(request_id=None, workload_id=None, transform_id=None, status=None, status_updated=False, session=None):
+def get_contents_by_request_transform(request_id=None, workload_id=None, transform_id=None, status=None, map_id=None, status_updated=False, session=None):
     """
     Get contents with request id, workload id and transform id.
 
@@ -343,7 +343,7 @@ def get_contents_by_request_transform(request_id=None, workload_id=None, transfo
     :returns: list of contents
     """
     ret = orm_contents.get_contents_by_request_transform(request_id=request_id, transform_id=transform_id,
-                                                         workload_id=workload_id, status=status,
+                                                         workload_id=workload_id, status=status, map_id=map_id,
                                                          status_updated=status_updated, session=session)
     return ret
 
@@ -499,7 +499,7 @@ def get_match_contents(coll_scope, coll_name, scope, name, min_id=None, max_id=N
 
 
 @read_session
-def get_content_status_statistics(coll_id=None, session=None):
+def get_content_status_statistics(coll_id=None, transform_ids=None, session=None):
     """
     Get statistics group by status
 
@@ -508,7 +508,33 @@ def get_content_status_statistics(coll_id=None, session=None):
 
     :returns: statistics group by status, as a dict.
     """
-    return orm_contents.get_content_status_statistics(coll_id=coll_id, session=session)
+    return orm_contents.get_content_status_statistics(coll_id=coll_id, transform_ids=transform_ids, session=session)
+
+
+@read_session
+def get_content_status_statistics_by_relation_type(transform_ids, bulk_size=500, session=None):
+    """
+    Get statistics group by status
+
+    :param coll_id: Collection id.
+    :param session: The database session in use.
+
+    :returns: statistics group by status, as a dict.
+    """
+    if transform_ids and not isinstance(transform_ids, (list, tuple)):
+        transform_ids = [transform_ids]
+    if transform_ids and len(transform_ids) == 1:
+        transform_ids = [transform_ids[0], transform_ids[0]]
+
+    if transform_ids and len(transform_ids) > bulk_size:
+        chunks = [transform_ids[i:i + bulk_size] for i in range(0, len(transform_ids), bulk_size)]
+        ret = []
+        for chunk in chunks:
+            tmp = orm_contents.get_content_status_statistics_by_relation_type(chunk, session=session)
+            ret += tmp
+        return ret
+    else:
+        return orm_contents.get_content_status_statistics_by_relation_type(transform_ids, session=session)
 
 
 @transactional_session
@@ -622,7 +648,7 @@ def get_output_contents_by_request_id_status(request_id, name, content_status, l
 
 
 @read_session
-def get_updated_transforms_by_content_status(request_id=None, transform_id=None):
+def get_updated_transforms_by_content_status(request_id=None, transform_id=None, session=None):
     """
     Get updated transform ids by content status
 
@@ -631,7 +657,7 @@ def get_updated_transforms_by_content_status(request_id=None, transform_id=None)
 
     :returns list
     """
-    return orm_contents.get_updated_transforms_by_content_status(request_id=request_id, transform_id=transform_id)
+    return orm_contents.get_updated_transforms_by_content_status(request_id=request_id, transform_id=transform_id, session=session)
 
 
 @transactional_session
@@ -656,6 +682,17 @@ def update_contents_from_others_by_dep_id(request_id=None, transform_id=None, se
     return orm_contents.update_contents_from_others_by_dep_id(request_id=request_id, transform_id=transform_id, session=session)
 
 
+@read_session
+def get_update_contents_from_others_by_dep_id(request_id=None, transform_id=None, session=None):
+    """
+    Update contents from others by content_dep_id
+
+    :param request_id: The Request id.
+    :param transfomr_id: The transform id.
+    """
+    return orm_contents.get_update_contents_from_others_by_dep_id(request_id=request_id, transform_id=transform_id, session=session)
+
+
 @transactional_session
 def add_contents_update(contents, bulk_size=10000, session=None):
     """
@@ -673,7 +710,27 @@ def add_contents_update(contents, bulk_size=10000, session=None):
 
 
 @transactional_session
-def delete_contents_update(request_id=None, transform_id=None, session=None):
+def set_fetching_contents_update(request_id=None, transform_id=None, fetch=False, session=None):
+    """
+    Set fetching contents update.
+
+    :param session: session.
+    """
+    return orm_contents.set_fetching_contents_update(request_id=request_id, transform_id=transform_id, fetch=fetch, session=session)
+
+
+@read_session
+def get_contents_update(request_id=None, transform_id=None, fetch=False, session=None):
+    """
+    Get contents update.
+
+    :param session: session.
+    """
+    return orm_contents.get_contents_update(request_id=request_id, transform_id=transform_id, fetch=fetch, session=session)
+
+
+@transactional_session
+def delete_contents_update(request_id=None, transform_id=None, contents=[], fetch=False, session=None):
     """
     delete a content.
 
@@ -682,7 +739,7 @@ def delete_contents_update(request_id=None, transform_id=None, session=None):
     :raises NoObject: If no content is founded.
     :raises DatabaseException: If there is a database error.
     """
-    return orm_contents.delete_contents_update(request_id=request_id, transform_id=transform_id, session=session)
+    return orm_contents.delete_contents_update(request_id=request_id, transform_id=transform_id, contents=contents, fetch=fetch, session=session)
 
 
 def get_contents_ext_maps():

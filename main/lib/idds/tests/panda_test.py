@@ -6,11 +6,47 @@ import datetime
 os.environ['PANDA_URL'] = 'http://pandaserver-doma.cern.ch:25080/server/panda'
 os.environ['PANDA_URL_SSL'] = 'https://pandaserver-doma.cern.ch:25443/server/panda'
 
+os.environ['PANDA_BEHIND_REAL_LB'] = "1"
+# os.environ['PANDA_URL'] = 'http://rubin-panda-server-dev.slac.stanford.edu:80/server/panda'
+# os.environ['PANDA_URL_SSL'] = 'https://rubin-panda-server-dev.slac.stanford.edu:8443/server/panda'
+
 from pandaclient import Client  # noqa E402
 
+
+task_ids = [160871, 160873, 160874, 160872, 160875]
+task_ids = []
+for task_id in task_ids:
+    print("retry %s" % task_id)
+    # ret = Client.retryTask(task_id, verbose=True)
+    # print(ret)
+
+# sys.exit(0)
+
+task_ids = [i for i in range(157023, 157050)]
+task_ids = []
+task_ids = [161488, 154806, 154805, 153413]
+task_ids = [i for i in range(191, 220)]
+task_ids = [162763, 162753]
+task_ids = [i for i in range(164147, 164384)]
+task_ids += [162282, 162283, 162588]
+task_ids = [i for i in range(163930, 164147)]
+task_ids = [161142, 160648]
+task_ids = [165124, 165130, 165135] + [i for i in range(165143, 165149)]
+task_ids = [i for i in range(251, 282)]
+task_ids = [282, 322, 323, 324, 325]
+task_ids = [i for i in range(165243, 165277)]
+task_ids = [165277]
+for task_id in task_ids:
+    print("Killing %s" % task_id)
+    ret = Client.killTask(task_id, verbose=True)
+    print(ret)
+
+sys.exit(0)
+
+# jobids = [52690679]
+jobids = [9]
 """
-jobids = [1408118]
-jobs_list_status = Client.getJobStatus(jobids, verbose=0)
+jobs_list_status = Client.getJobStatus(jobids, verbose=1)
 print(jobs_list_status)
 jobs_list = jobs_list_status[1]
 print(jobs_list)
@@ -29,10 +65,28 @@ for job_info in jobs_list:
             print(f.type)
 """
 
+# ret = Client.getFullJobStatus(ids=jobids, verbose=False)
+# print(ret)
+
+jediTaskID = 156668
+ret = Client.get_files_in_datasets(jediTaskID, verbose=False)
+print(ret)
+
+print("get events")
+panda_ids = [{'task_id': 157016, 'panda_id': 53943290}]
+panda_ids = [{'task_id': 157076, 'panda_id': 53943504}]
+ret = Client.get_events_status(panda_ids, verbose=True)
+print(ret)
+
+# sys.exit(0)
+
+"""
 jediTaskID = 10517    # 10607
-jediTaskID = 59725
+jediTaskID = 146329
 ret = Client.getJediTaskDetails({'jediTaskID': jediTaskID}, True, True, verbose=False)
 print(ret)
+# ret = Client.getTaskStatus(jediTaskID, verbose=False)
+# print(ret)
 
 # ret = Client.getTaskStatus(jediTaskID, verbose=False)
 # print(ret)
@@ -59,25 +113,33 @@ if ret[0] == 0:
         print(len(ret[1]))
     ret_jobs = ret_jobs + ret[1]
     print(len(ret_jobs))
+"""
 
 # sys.exit(0)
 
-"""
-jediTaskID = 998
+
+jediTaskID = 152096
+# jediTaskID = 154357
+print(jediTaskID)
+
+ret = Client.getTaskStatus(jediTaskID)
+print(ret)
+
 ret = Client.getPandaIDsWithTaskID(jediTaskID, verbose=False)
-# print(ret)
+print(ret)
 jobids = ret[1]
-# print(jobids)
+print(jobids)
 
 ret = Client.getJobStatus(ids=jobids, verbose=False)
 print(ret)
 
 ret = Client.getFullJobStatus(ids=jobids, verbose=False)
-# print(ret)
+print(ret)
 
 ret = Client.getJediTaskDetails({'jediTaskID': jediTaskID}, True, True, verbose=False)
 print(ret)
-"""
+
+# sys.exit(0)
 
 task_ids = []
 # task_ids = [1565, 1566, 1567, 1568, 1570, 1572, 1575, 1576, 1579, 1580, 1581, 1582, 1584, 1585, 1586, 1587, 1588, 1589, 1590, 1591, 1592, 1593, 1597, 1598, 1599, 1601, 1602, 1603, 1604, 1607, 1608, 1609, 1610, 1611, 1612, 1613, 1617]
@@ -97,7 +159,17 @@ task_ids = []
 # task_ids = [i for i in range(142507, 142651)]
 # task_ids = [i for i in range(140349, 140954)] + [142268, 142651]
 # task_ids = [1851] + [i for i in range(4336, 4374)] + [i for i in range(133965, 136025)]
-task_ids = [832, 2347, 3045, 66860, 67036] + [i for i in range(121273, 140349)]
+# task_ids = [832, 2347, 3045, 66860, 67036] + [i for i in range(121273, 140349)]
+# task_ids = [i for i in range(144088, 144111)] + [144891, 144892]
+# task_ids = [i for i in range(150050, 150065)]
+# task_ids = [150607, 150619, 150649, 150637, 150110, 150111]
+# task_ids = [150864, 150897, 150910]
+# task_ids = [151114, 151115]
+# task_ids = [i for i in range(151444, 151453)]
+task_ids = [i for i in range(45, 53)]
+# task_ids = []
+task_ids = [i for i in range(156974, 156981)]
+task_ids = [i for i in range(157023, 157050)]
 for task_id in task_ids:
     print("Killing %s" % task_id)
     Client.killTask(task_id)

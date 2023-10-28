@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2020 - 2021
+# - Wen Guan, <wen.guan@cern.ch>, 2020 - 2023
 
 import copy
 import datetime
@@ -590,6 +590,8 @@ class Work(Base):
 
         self.is_build_work = False
 
+        self.func_site_to_cloud = None
+
         """
         self._running_data_names = []
         for name in ['internal_id', 'template_work_id', 'initialized', 'sequence_id', 'parameters', 'work_id', 'transforming', 'workdir',
@@ -850,6 +852,9 @@ class Work(Base):
                     coll_metadata[k] = {'coll_id': coll.coll_id}
         self.add_metadata_item('collections', coll_metadata)
 
+    def with_sub_map_id(self):
+        return False
+
     @property
     def processings(self):
         return self._processings
@@ -866,6 +871,9 @@ class Work(Base):
                                         'workload_id': proc.workload_id,
                                         'external_id': proc.external_id}
         self.add_metadata_item('processings', proc_metadata)
+
+    def generating_new_inputs(self):
+        return False
 
     def refresh_work(self):
         coll_metadata = {}
@@ -1112,6 +1120,12 @@ class Work(Base):
     def get_work_name(self):
         return self.work_name
 
+    def set_func_site_to_cloud(self, func):
+        self.func_site_to_cloud = func
+
+    def get_func_site_to_cloud(self):
+        return self.func_site_to_cloud
+
     def get_is_template(self):
         self.is_template
 
@@ -1285,9 +1299,9 @@ class Work(Base):
         self.last_updated_at = datetime.datetime.utcnow()
 
     def set_agent_attributes(self, attrs, req_attributes=None):
+        if self.agent_attributes is None:
+            self.agent_attributes = {}
         if attrs and self.class_name in attrs:
-            if self.agent_attributes is None:
-                self.agent_attributes = {}
             for key, value in attrs[self.class_name].items():
                 self.agent_attributes[key] = value
         self.logger.info("agent_attributes: %s" % self.agent_attributes)
@@ -1863,6 +1877,9 @@ class Work(Base):
     def require_ext_contents(self):
         return False
 
+    def has_external_content_id(self):
+        return False
+
     def set_work_name_to_coll_map(self, work_name_to_coll_map):
         self.work_name_to_coll_map = work_name_to_coll_map
 
@@ -2295,3 +2312,6 @@ class Work(Base):
             os.environ['X509_USER_PROXY'] = self.original_proxy
         else:
             del os.environ['X509_USER_PROXY']
+
+    def get_external_content_ids(self, processing, log_prefix=''):
+        return []

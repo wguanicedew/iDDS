@@ -6,13 +6,10 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2022
+# - Wen Guan, <wen.guan@cern.ch>, 2023
 
 
-FROM docker.io/centos:7
-
-ENV LANG en_US.UTF-8
-ENV LC_ALL en_US.UTF-8
+FROM docker.io/almalinux:9.2
 
 ARG TAG
 
@@ -25,20 +22,26 @@ RUN yum upgrade -y && \
     yum clean all && \
     rm -rf /var/cache/yum
 
+RUN yum install -y yum-utils
+RUN yum-config-manager --enable crb
+
 # RUN yum install -y httpd.x86_64 conda gridsite mod_ssl.x86_64 httpd-devel.x86_64 gcc.x86_64 supervisor.noarch fetch-crl.noarch lcg-CA postgresql postgresql-contrib postgresql-static postgresql-libs postgresql-devel && \
 #     yum clean all && \
 #     rm -rf /var/cache/yum
-RUN yum install -y httpd.x86_64 which conda gridsite mod_ssl.x86_64 httpd-devel.x86_64 gcc.x86_64 supervisor.noarch fetch-crl.noarch lcg-CA redis syslog-ng && \
+RUN yum install -y httpd.x86_64 which conda gridsite mod_ssl.x86_64 httpd-devel.x86_64 gcc.x86_64 supervisor.noarch fetch-crl.noarch redis syslog-ng procps passwd which && \
 yum clean all && \
 rm -rf /var/cache/yum
 
-RUN yum install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-7-x86_64/pgdg-redhat-repo-latest.noarch.rpm
-RUN yum install -y postgresql14
+# install postgres
+RUN yum install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+RUN yum install --nogpgcheck -y postgresql16
+RUN  yum clean all && rm -rf /var/cache/yum
 
-# RUN curl http://repository.egi.eu/sw/production/cas/1/current/repo-files/EGI-trustanchors.repo -o /etc/yum.repos.d/EGI-trustanchors.repo
-RUN curl https://repository.egi.eu/sw/production/cas/1/current/repo-files/EGI-trustanchors.repo -o /etc/yum.repos.d/EGI-trustanchors.repo
 
-RUN yum install -y fetch-crl.noarch lcg-CA ca-policy-egi-core && \
+# RUN curl http://repository.egi.eu/sw/production/cas/1/current/repo-files/EGI-trustanchors.repo -o /etc/yum.repos.d/EGI-trustanchors.repo/
+RUN curl https://repository.egi.eu/sw/production/cas/1/current/repo-files/egi-trustanchors.repo -o /etc/yum.repos.d/EGI-trustanchors.repo
+
+RUN yum install -y fetch-crl.noarch ca-policy-egi-core && \
     yum clean all && \
     rm -rf /var/cache/yum
 
@@ -58,7 +61,7 @@ RUN chown atlpan -R /var/log/idds
 RUN chown apache -R /var/idds/wsgisocks/
 
 # redis
-RUN chmod a+rx /etc/redis*
+RUN chmod -R a+rx /etc/redis*
 # RUN chmod a+rwx /var/log/redis
 # RUN chmod a+rwx /var/lib/redis
 RUN rm -fr /var/log/redis
@@ -84,7 +87,7 @@ RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip ins
 
 RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade requests SQLAlchemy urllib3 retrying mod_wsgi flask futures stomp.py cx-Oracle  unittest2 pep8 flake8 pytest nose sphinx recommonmark sphinx-rtd-theme nevergrad
 RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade psycopg2-binary
-RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade rucio-clients-atlas rucio-clients panda-client
+RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade rucio-clients-atlas rucio-clients panda-client-light
 
 
 WORKDIR /tmp/src
@@ -120,6 +123,7 @@ RUN ln -fs /opt/idds/config/ca.crt /opt/idds/etc/ca.crt
 RUN ln -fs /opt/idds/config/rucio.cfg /opt/idds/etc/rucio.cfg
 
 # for panda client to access panda
+RuN mkdir -p /opt/idds/etc/panda/
 RUN ln -fs /opt/idds/config/panda.cfg /opt/idds/etc/panda/panda.cfg
 
 # for idds rest service
@@ -135,15 +139,19 @@ RUN sed -i "s/WSGISocketPrefix\ \/var\/log\/idds\/wsgisocks\/wsgi/WSGISocketPref
 
 # for idds daemons
 RUN ln -fs /opt/idds/config/idds/supervisord_idds.ini /etc/supervisord.d/idds.ini
-RUN ln -fs /opt/idds/config/idds/supervisord_iddsfake.ini /etc/supervisord.d/iddsfake.ini
+# RUN ln -fs /opt/idds/config/idds/supervisord_iddsfake.ini /etc/supervisord.d/iddsfake.ini
 RUN ln -fs /opt/idds/config/idds/supervisord_httpd.ini /etc/supervisord.d/httpd.ini
-RUN ln -fs /opt/idds/config/idds/supervisord_syslog-ng.ini /etc/supervisord.d/syslog-ng.ini
+# RUN ln -fs /opt/idds/config/idds/supervisord_syslog-ng.ini /etc/supervisord.d/syslog-ng.ini
+RUN ln -fs /opt/idds/config/idds/supervisord_logrotate.ini /etc/supervisord.d/logrotate.ini
+RUN ln -fs /opt/idds/config/idds/logrotate_idds /etc/logrotate.d/idds
 
 # for syslog-ng
 RUN mv /etc/syslog-ng/syslog-ng.conf /etc/syslog-ng/syslog-ng.conf.back
 ADD main/tools/syslog-ng/syslog-ng.conf /etc/syslog-ng/
 ADD main/tools/syslog-ng/idds.conf /etc/syslog-ng/conf.d/
 ADD main/tools/syslog-ng/http.conf /etc/syslog-ng/conf.d/
+
+RUN chown atlpan -R /etc/grid-security/certificates
 
 RUN chmod -R 777 /opt/idds/config
 RUN chmod -R 777 /var/log/idds
