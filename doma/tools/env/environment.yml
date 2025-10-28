@@ -1,9 +1,0 @@
-name: iDDS-doma
-dependencies:
-- python==3.6
-- pip
-- pip:
-  - futures                          # multiple process/threads
-  - panda-client-light     # panda client
-  - idds-common==0.11.5
-  - idds-workflow==0.11.5

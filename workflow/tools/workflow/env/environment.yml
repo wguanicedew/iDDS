@@ -1,0 +1,9 @@
+name: iDDS
+dependencies:
+- python==3.6
+- pip
+- pip:
+  - anytree
+  - networkx
+  - stomp.py
+  - idds-common==2.2.21

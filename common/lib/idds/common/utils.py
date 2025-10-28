@@ -6,28 +6,40 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2025
+# - Lino Oscar Gerlach, <lino.oscar.gerlach@cern.ch>, 2024
 
-
+import base64
+import concurrent.futures
+import contextlib
 import errno
 import datetime
+import functools
+import importlib
+import hashlib
 import logging
 import json
 import os
 import re
 import requests
+import signal
+import socket
 import subprocess
 import sys
 import tarfile
+import threading
 import time
-# import traceback
 
 from enum import Enum
 from functools import wraps
+from logging.handlers import RotatingFileHandler
+from itertools import groupby
+from operator import itemgetter
 from packaging import version as packaging_version
+from typing import Any, Callable
 
 from idds.common.config import (config_has_section, config_has_option,
-                                config_get, config_get_bool)
+                                config_get, config_get_bool, config_get_int)
 from idds.common.constants import (IDDSEnum, RequestType, RequestStatus,
                                    TransformType, TransformStatus,
                                    CollectionType, CollectionRelationType, CollectionStatus,
@@ -47,7 +59,7 @@ def get_log_dir():
     return "/var/log/idds"
 
 
-def setup_logging(name, stream=None, loglevel=None):
+def setup_logging(name, stream=None, log_file=None, loglevel=None):
     """
     Setup logging
     """
@@ -57,15 +69,43 @@ def setup_logging(name, stream=None, loglevel=None):
         else:
             loglevel = logging.INFO
 
-    if os.environ.get('IDDS_LOG_LEVEL', None):
-        idds_log_level = os.environ.get('IDDS_LOG_LEVEL', None)
-        idds_log_level = idds_log_level.upper()
-        if idds_log_level in ["DEBUG", "CRITICAL", "ERROR", "WARNING", "INFO"]:
-            loglevel = getattr(logging, idds_log_level)
+        if os.environ.get('IDDS_LOG_LEVEL', None):
+            idds_log_level = os.environ.get('IDDS_LOG_LEVEL', None)
+            idds_log_level = idds_log_level.upper()
+            if idds_log_level in ["DEBUG", "CRITICAL", "ERROR", "WARNING", "INFO"]:
+                loglevel = getattr(logging, idds_log_level)
 
-    if stream is None:
-        if config_has_section('common') and config_has_option('common', 'logdir'):
-            logging.basicConfig(filename=os.path.join(config_get('common', 'logdir'), name),
+    if type(loglevel) in [str]:
+        loglevel = loglevel.upper()
+        loglevel = getattr(logging, loglevel)
+
+    if log_file is not None:
+        if not log_file.startswith("/"):
+            logdir = None
+            if config_has_section('common') and config_has_option('common', 'logdir'):
+                logdir = config_get('common', 'logdir')
+            if not logdir:
+                logdir = '/var/log/idds'
+            log_file = os.path.join(logdir, log_file)
+
+    if log_file:
+        logging.basicConfig(filename=log_file,
+                            level=loglevel,
+                            format='%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s')
+    elif stream is None:
+        if os.environ.get('IDDS_LOG_FILE', None):
+            idds_log_file = os.environ.get('IDDS_LOG_FILE', None)
+            logging.basicConfig(filename=idds_log_file,
+                                level=loglevel,
+                                format='%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s')
+        elif ((config_has_section('common') and config_has_option('common', 'logdir') and config_has_option('common', 'logfile')) or log_file):
+            if log_file:
+                log_filename = log_file
+            else:
+                log_filename = config_get('common', 'logfile')
+                if not log_filename.startswith("/"):
+                    log_filename = os.path.join(config_get('common', 'logdir'), log_filename)
+            logging.basicConfig(filename=log_filename,
                                 level=loglevel,
                                 format='%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s')
         else:
@@ -99,7 +139,7 @@ def get_logger(name, filename=None, loglevel=None):
 
     formatter = logging.Formatter('%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s')
 
-    handler = logging.FileHandler(filename)
+    handler = RotatingFileHandler(filename, maxBytes=2 * 1024 * 1024 * 1024, backupCount=3)
     handler.setFormatter(formatter)
     logger = logging.getLogger(name)
     logger.setLevel(loglevel)
@@ -135,6 +175,37 @@ def get_rest_cacher_dir():
     if cacher_dir and os.path.exists(cacher_dir):
         return cacher_dir
     raise Exception("cacher_dir is not defined or it doesn't exist")
+
+
+def get_asyncresult_config():
+    broker_type = None
+    brokers = None
+    broker_destination = None
+    broker_timeout = 360
+    broker_username = None
+    broker_password = None
+    broker_x509 = None
+
+    if config_has_section('asyncresult'):
+        if config_has_option('asyncresult', 'broker_type'):
+            broker_type = config_get('asyncresult', 'broker_type')
+        if config_has_option('asyncresult', 'brokers'):
+            brokers = config_get('asyncresult', 'brokers')
+        if config_has_option('asyncresult', 'broker_destination'):
+            broker_destination = config_get('asyncresult', 'broker_destination')
+        if config_has_option('asyncresult', 'broker_timeout'):
+            broker_timeout = config_get_int('asyncresult', 'broker_timeout')
+        if config_has_option('asyncresult', 'broker_username'):
+            broker_username = config_get('asyncresult', 'broker_username')
+        if config_has_option('asyncresult', 'broker_password'):
+            broker_password = config_get('asyncresult', 'broker_password')
+        if config_has_option('asyncresult', 'broker_x509'):
+            broker_x509 = config_get('asyncresult', 'broker_x509')
+
+    ret = {'broker_type': broker_type, 'brokers': brokers, 'broker_destination': broker_destination,
+           'broker_timeout': broker_timeout, 'broker_username': broker_username, 'broker_password': broker_password,
+           'broker_x509': broker_x509}
+    return ret
 
 
 def str_to_date(string):
@@ -232,15 +303,112 @@ def check_database():
     return False
 
 
-def run_process(cmd, stdout=None, stderr=None):
+def kill_process_group(pgrp, nap=10):
+    """
+    Kill the process group.
+    DO NOT MOVE TO PROCESSES.PY - will lead to circular import since execute() needs it as well.
+    :param pgrp: process group id (int).
+    :param nap: napping time between kill signals in seconds (int)
+    :return: boolean (True if SIGTERM followed by SIGKILL signalling was successful)
+    """
+
+    status = False
+    _sleep = True
+
+    # kill the process gracefully
+    print(f"killing group process {pgrp}")
+    try:
+        os.killpg(pgrp, signal.SIGTERM)
+    except Exception as error:
+        print(f"exception thrown when killing child group process under SIGTERM: {error}")
+        _sleep = False
+    else:
+        print(f"SIGTERM sent to process group {pgrp}")
+
+    if _sleep:
+        print(f"sleeping {nap} s to allow processes to exit")
+        time.sleep(nap)
+
+    try:
+        os.killpg(pgrp, signal.SIGKILL)
+    except Exception as error:
+        print(f"exception thrown when killing child group process with SIGKILL: {error}")
+    else:
+        print(f"SIGKILL sent to process group {pgrp}")
+        status = True
+
+    return status
+
+
+def kill_all(process: Any) -> str:
+    """
+    Kill all processes after a time-out exception in process.communication().
+
+    :param process: process object
+    :return: stderr (str).
+    """
+
+    stderr = ''
+    try:
+        print('killing lingering subprocess and process group')
+        time.sleep(1)
+        # process.kill()
+        kill_process_group(os.getpgid(process.pid))
+    except ProcessLookupError as exc:
+        stderr += f'\n(kill process group) ProcessLookupError={exc}'
+    except Exception as exc:
+        stderr += f'\n(kill_all 1) exception caught: {exc}'
+    try:
+        print('killing lingering process')
+        time.sleep(1)
+        os.kill(process.pid, signal.SIGTERM)
+        print('sleeping a bit before sending SIGKILL')
+        time.sleep(10)
+        os.kill(process.pid, signal.SIGKILL)
+    except ProcessLookupError as exc:
+        stderr += f'\n(kill process) ProcessLookupError={exc}'
+    except Exception as exc:
+        stderr += f'\n(kill_all 2) exception caught: {exc}'
+    print(f'sent soft kill signals - final stderr: {stderr}')
+    return stderr
+
+
+def run_process(cmd, stdout=None, stderr=None, wait=False, timeout=7 * 24 * 3600):
     """
     Runs a command in an out-of-procees shell.
     """
+    print(f"To run command: {cmd}")
     if stdout and stderr:
-        process = subprocess.Popen(cmd, shell=True, stdout=stdout, stderr=stderr, preexec_fn=os.setsid)
+        process = subprocess.Popen(cmd, shell=True, stdout=stdout, stderr=stderr, preexec_fn=os.setsid, encoding='utf-8')
     else:
-        process = subprocess.Popen(cmd, shell=True)
-    return process
+        process = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid, encoding='utf-8')
+    if not wait:
+        return process
+
+    try:
+        print(f'subprocess.communicate() will use timeout={timeout} s')
+        process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as ex:
+        stderr = f'subprocess communicate sent TimeoutExpired: {ex}'
+        print(stderr)
+        stderr = kill_all(process)
+        print(f'Killing process: {stderr}')
+        exit_code = -1
+    except Exception as ex:
+        stderr = f'subprocess has an exception: {ex}'
+        print(stderr)
+        stderr = kill_all(process)
+        print(f'Killing process: {stderr}')
+        exit_code = -1
+    else:
+        exit_code = process.poll()
+
+    try:
+        process.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        print("process did not complete within the timeout of 60s - terminating")
+        process.terminate()
+    return exit_code
 
 
 def run_command(cmd):
@@ -462,11 +630,11 @@ def exception_handler(function):
         except IDDSException as ex:
             logging.error(ex)
             # print(traceback.format_exc())
-            return str(ex)
+            return False, str(ex)
         except Exception as ex:
             logging.error(ex)
             # print(traceback.format_exc())
-            return str(ex)
+            return False, str(ex)
     return new_funct
 
 
@@ -609,3 +777,368 @@ def report_availability(availability):
         error = "Failed to report availablity: %s" % str(ex)
         print(error)
         logging.debug(error)
+
+
+def split_chunks_not_continous(data):
+    rets = []
+    for k, g in groupby(enumerate(data), lambda i_x: i_x[0] - i_x[1]):
+        rets.append(list(map(itemgetter(1), g)))
+    return rets
+
+
+def group_list(input_list, key):
+    update_groups = {}
+    for item in input_list:
+        item_key = item[key]
+        del item[key]
+        item_tuple = str(tuple(sorted(item.items())))
+        if item_tuple not in update_groups:
+            update_groups[item_tuple] = {'keys': [], 'items': item}
+        update_groups[item_tuple]['keys'].append(item_key)
+    return update_groups
+
+
+def import_func(name: str) -> Callable[..., Any]:
+    """Returns a function from a dotted path name. Example: `path.to.module:func`.
+
+    When the attribute we look for is a staticmethod, module name in its
+    dotted path is not the last-before-end word
+
+    E.g.: package_a.package_b.module_a:ClassA.my_static_method
+
+    Thus we remove the bits from the end of the name until we can import it
+
+    Args:
+        name (str): The name (reference) to the path.
+
+    Raises:
+        ValueError: If no module is found or invalid attribute name.
+
+    Returns:
+        Any: An attribute (normally a Callable)
+    """
+    name_bits = name.split(':')
+    module_name_bits, attribute_bits = name_bits[:-1], [name_bits[-1]]
+    module_name_bits = module_name_bits.split('.')
+    attribute_bits = attribute_bits.split('.')
+    module = None
+    while len(module_name_bits):
+        try:
+            module_name = '.'.join(module_name_bits)
+            module = importlib.import_module(module_name)
+            break
+        except ImportError:
+            attribute_bits.insert(0, module_name_bits.pop())
+
+    if module is None:
+        # maybe it's a builtin
+        try:
+            return __builtins__[name]
+        except KeyError:
+            raise ValueError('Invalid attribute name: %s' % name)
+
+    attribute_name = '.'.join(attribute_bits)
+    if hasattr(module, attribute_name):
+        return getattr(module, attribute_name)
+    # staticmethods
+    attribute_name = attribute_bits.pop()
+    attribute_owner_name = '.'.join(attribute_bits)
+    try:
+        attribute_owner = getattr(module, attribute_owner_name)
+    except:  # noqa
+        raise ValueError('Invalid attribute name: %s' % attribute_name)
+
+    if not hasattr(attribute_owner, attribute_name):
+        raise ValueError('Invalid attribute name: %s' % name)
+    return getattr(attribute_owner, attribute_name)
+
+
+def import_attribute(name: str) -> Callable[..., Any]:
+    """Returns an attribute from a dotted path name. Example: `path.to.func`.
+
+    When the attribute we look for is a staticmethod, module name in its
+    dotted path is not the last-before-end word
+
+    E.g.: package_a.package_b.module_a.ClassA.my_static_method
+
+    Thus we remove the bits from the end of the name until we can import it
+
+    Args:
+        name (str): The name (reference) to the path.
+
+    Raises:
+        ValueError: If no module is found or invalid attribute name.
+
+    Returns:
+        Any: An attribute (normally a Callable)
+    """
+    name_bits = name.split('.')
+    module_name_bits, attribute_bits = name_bits[:-1], [name_bits[-1]]
+    module = None
+    while len(module_name_bits):
+        try:
+            module_name = '.'.join(module_name_bits)
+            module = importlib.import_module(module_name)
+            break
+        except ImportError:
+            attribute_bits.insert(0, module_name_bits.pop())
+
+    if module is None:
+        # maybe it's a builtin
+        try:
+            return __builtins__[name]
+        except KeyError:
+            raise ValueError('Invalid attribute name: %s' % name)
+
+    attribute_name = '.'.join(attribute_bits)
+    if hasattr(module, attribute_name):
+        return getattr(module, attribute_name)
+    # staticmethods
+    attribute_name = attribute_bits.pop()
+    attribute_owner_name = '.'.join(attribute_bits)
+    try:
+        attribute_owner = getattr(module, attribute_owner_name)
+    except:  # noqa
+        raise ValueError('Invalid attribute name: %s' % attribute_name)
+
+    if not hasattr(attribute_owner, attribute_name):
+        raise ValueError('Invalid attribute name: %s' % name)
+    return getattr(attribute_owner, attribute_name)
+
+
+def decode_base64(sb, remove_quotes=False):
+    try:
+        if isinstance(sb, str):
+            sb_bytes = bytes(sb, 'ascii')
+        elif isinstance(sb, bytes):
+            sb_bytes = sb
+        else:
+            return sb
+        decode_str = base64.b64decode(sb_bytes).decode("utf-8")
+        # remove the single quotes afeter decoding
+        if remove_quotes:
+            return decode_str[1:-1]
+        return decode_str
+    except Exception as ex:
+        logging.error("decode_base64 %s: %s" % (sb, ex))
+        return sb
+
+
+def encode_base64(sb):
+    try:
+        if isinstance(sb, str):
+            sb_bytes = bytes(sb, 'ascii')
+        elif isinstance(sb, bytes):
+            sb_bytes = sb
+        return base64.b64encode(sb_bytes).decode("utf-8")
+    except Exception as ex:
+        logging.error("encode_base64 %s: %s" % (sb, ex))
+        return sb
+
+
+def is_execluded_file(file, exclude_files=[]):
+    if exclude_files:
+        for f in exclude_files:
+            reg = re.compile(f)
+            if re.match(reg, file):
+                return True
+    return False
+
+
+def create_archive_file(work_dir, archive_filename, files, exclude_files=[]):
+    if not archive_filename.startswith("/"):
+        archive_filename = os.path.join(work_dir, archive_filename)
+
+    with tarfile.open(archive_filename, "w:gz", dereference=True) as tar:
+        for local_file in files:
+            if os.path.isfile(local_file):
+                if is_execluded_file(local_file, exclude_files):
+                    continue
+                # base_name = os.path.basename(local_file)
+                tar.add(local_file, arcname=os.path.basename(local_file))
+            elif os.path.isdir(local_file):
+                for filename in os.listdir(local_file):
+                    if is_execluded_file(filename, exclude_files):
+                        continue
+                    if os.path.isfile(filename):
+                        file_path = os.path.join(local_file, filename)
+                        tar.add(file_path, arcname=os.path.relpath(file_path, local_file))
+                    elif os.path.isdir(filename):
+                        for root, dirs, fs in os.walk(filename):
+                            for f in fs:
+                                if not is_execluded_file(f, exclude_files):
+                                    file_path = os.path.join(root, f)
+                                    tar.add(file_path, arcname=os.path.relpath(file_path, local_file))
+    return archive_filename
+
+
+class SecureString(object):
+    def __init__(self, value):
+        self._value = value
+
+    def __str__(self):
+        return '****'
+
+
+def is_panda_client_verbose():
+    verbose = os.environ.get("PANDA_CLIENT_VERBOSE", None)
+    if verbose:
+        verbose = verbose.lower()
+        if verbose == 'true':
+            return True
+    return False
+
+
+def get_unique_id_for_dict(dict_):
+    ret = hashlib.sha1(json.dumps(dict_, sort_keys=True).encode()).hexdigest()
+    # logging.debug("get_unique_id_for_dict, type: %s: %s, ret: %s" % (type(dict_), dict_, ret))
+    return ret
+
+
+def idds_mask(dict_):
+    ret = {}
+    for k in dict_:
+        if 'pass' in k or 'password' in k or 'passwd' in k or 'token' in k or 'security' in k or 'secure' in k:
+            ret[k] = "***"
+        else:
+            ret[k] = dict_[k]
+    return ret
+
+
+@contextlib.contextmanager
+def modified_environ(*remove, **update):
+    """
+    Temporarily updates the ``os.environ`` dictionary in-place.
+    The ``os.environ`` dictionary is updated in-place so that the modification
+    is sure to work in all situations.
+    :param remove: Environment variables to remove.
+    :param update: Dictionary of environment variables and values to add/update.
+    """
+    env = os.environ
+    update = update or {}
+    remove = remove or []
+
+    # List of environment variables being updated or removed.
+    stomped = (set(update.keys()) | set(remove)) & set(env.keys())
+    # Environment variables and values to restore on exit.
+    update_after = {k: env[k] for k in stomped}
+    # Environment variables and values to remove on exit.
+    remove_after = frozenset(k for k in update if k not in env)
+
+    try:
+        env.update(update)
+        [env.pop(k, None) for k in remove]
+        yield
+    finally:
+        env.update(update_after)
+        [env.pop(k) for k in remove_after]
+
+
+def run_with_timeout(func, args=(), kwargs={}, timeout=None, retries=1):
+    """
+    Run a function with a timeout.
+
+    Parameters:
+        func (callable): The function to run.
+        args (tuple): The arguments to pass to the function.
+        kwargs (dict): The keyword arguments to pass to the function.
+        timeout (float or int): The time limit in seconds.
+
+    Returns:
+        The function's result if it finishes within the timeout.
+        Raises TimeoutError if the function takes longer than the specified timeout.
+    """
+    for i in range(retries):
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(func, *args, **kwargs)
+            try:
+                if i > 0:
+                    logging.info(f"retry {i} to execute function.")
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                # raise TimeoutError(f"Function '{func.__name__}' timed out after {timeout} seconds.")
+                logging.error(f"Function '{func.__name__}' timed out after {timeout} seconds in retry {i}.")
+    return TimeoutError(f"Function '{func.__name__}' timed out after {timeout} seconds.")
+
+
+def timeout_wrapper(timeout, retries=1):
+    """
+    Decorator to timeout a function after a given number of seconds.
+
+    Parameters:
+        seconds (int or float): The time limit in seconds.
+
+    Raises:
+        TimeoutError: If the function execution exceeds the time limit.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for i in range(retries):
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(func, *args, **kwargs)
+                    try:
+                        if i > 0:
+                            logging.info(f"retry {i} to execute function.")
+
+                        return future.result(timeout=timeout)
+                    except concurrent.futures.TimeoutError:
+                        # raise TimeoutError(f"Function '{func.__name__}' timed out after {seconds} seconds.")
+                        logging.error(f"Function '{func.__name__}' timed out after {timeout} seconds in retry {i}.")
+            return TimeoutError(f"Function '{func.__name__}' timed out after {timeout} seconds.")
+        return wrapper
+    return decorator
+
+
+def get_process_thread_info():
+    """
+    Returns: hostname, process id, thread id and thread name
+    """
+    hostname = socket.getfqdn()
+    hostname = hostname.split('.')[0]
+    pid = os.getpid()
+    hb_thread = threading.current_thread()
+    thread_id = hb_thread.ident
+    thread_name = hb_thread.name
+    return hostname, pid, thread_id, thread_name
+
+
+def run_command_with_timeout(command, timeout=600, stdout=sys.stdout, stderr=sys.stderr):
+    """
+    Run a command and monitor its output. Terminate if no output within timeout.
+    """
+    last_output_time = time.time()
+
+    def monitor_output(stream, output, timeout):
+        nonlocal last_output_time
+        for line in iter(stream.readline, b""):
+            output.buffer.write(line)
+            output.flush()
+            last_output_time = time.time()  # Reset timer on new output
+
+    # Start the process
+    process = subprocess.Popen(command,
+                               preexec_fn=os.setsid,    # setpgrp
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
+
+    # Start the monitoring thread
+    stdout_thread = threading.Thread(target=monitor_output, args=(process.stdout, stdout, timeout))
+    stderr_thread = threading.Thread(target=monitor_output, args=(process.stderr, stderr, timeout))
+    stdout_thread.start()
+    stderr_thread.start()
+
+    # monitor the output and enforce timeout
+    while process.poll() is None:
+        time_elapsed = time.time() - last_output_time
+        if time_elapsed > timeout:
+            print(f"No output for {time_elapsed} seconds. Terminating process.")
+            kill_all(process)
+            break
+        time.sleep(10)  # Check every second
+
+    # Wait for the process to complete and join the monitoring thread
+    stdout_thread.join()
+    stderr_thread.join()
+    process.wait()
+    return process

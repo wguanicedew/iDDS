@@ -29,11 +29,14 @@ class MessagingListener(stomp.ConnectionListener):
     '''
     Messaging Listener
     '''
-    def __init__(self, broker, output_queue, logger=None):
+    def __init__(self, broker, output_queue, name=None, logger=None):
         '''
         __init__
         '''
-        self.name = "MessagingListener"
+        # self.name = "MessagingListener"
+        self.name = name
+        if not self.name:
+            self.name = 'default'
         self.__broker = broker
         self.__output_queue = output_queue
         # self.logger = logging.getLogger(self.__class__.__name__)
@@ -49,8 +52,10 @@ class MessagingListener(stomp.ConnectionListener):
         self.logger.error('[broker] [%s]: %s', self.__broker, frame.body)
 
     def on_message(self, frame):
-        self.logger.debug('[broker] [%s]: %s', self.__broker, frame.body)
-        self.__output_queue.put(frame.body)
+        self.logger.debug(f'[broker] {self.name} [{self.__broker}]: headers: {frame.headers}, body: {frame.body}')
+        headers = frame.headers
+        from_idds = headers.get('from_idds', 'false')
+        self.__output_queue.put({'name': self.name, 'from_idds': from_idds, 'msg': {'headers': frame.headers, 'body': json_loads(frame.body)}})
         pass
 
 
@@ -206,17 +211,30 @@ class MessagingSender(PluginBase, threading.Thread):
         destination = msg['destination'] if 'destination' in msg else 'default'
         conn, queue_dest, destination = self.get_connection(destination)
 
+        from_idds = 'false'
+        if 'from_idds' in msg and msg['from_idds']:
+            from_idds = 'true'
+
         if conn:
             self.logger.info("Sending message to message broker(%s): %s" % (destination, msg['msg_id']))
             self.logger.debug("Sending message to message broker(%s): %s" % (destination, json_dumps(msg['msg_content'])))
-            conn.send(body=json_dumps(msg['msg_content']),
-                      destination=queue_dest,
-                      id='atlas-idds-messaging',
-                      ack='auto',
-                      headers={'persistent': 'true',
-                               'ttl': self.timetolive,
-                               'vo': 'atlas',
-                               'msg_type': str(msg['msg_type']).lower()})
+            if type(msg['msg_content']) in [dict] and 'headers' in msg['msg_content'] and 'body' in msg['msg_content']:
+                msg['msg_content']['headers']['from_idds'] = from_idds
+                conn.send(body=json_dumps(msg['msg_content']['body']),
+                          headers=msg['msg_content']['headers'],
+                          destination=queue_dest,
+                          id='atlas-idds-messaging',
+                          ack='auto')
+            else:
+                conn.send(body=json_dumps(msg['msg_content']),
+                          destination=queue_dest,
+                          id='atlas-idds-messaging',
+                          ack='auto',
+                          headers={'persistent': 'true',
+                                   'ttl': self.timetolive,
+                                   'vo': 'atlas',
+                                   'from_idds': from_idds,
+                                   'msg_type': str(msg['msg_type']).lower()})
         else:
             self.logger.info("No brokers defined, discard(%s): %s" % (destination, msg['msg_id']))
 
@@ -251,21 +269,23 @@ class MessagingSender(PluginBase, threading.Thread):
 class MessagingReceiver(MessagingSender):
     def __init__(self, name="MessagingReceiver", logger=None, **kwargs):
         super(MessagingReceiver, self).__init__(name=name, logger=logger, **kwargs)
-        self.listener = None
+        self.listener = {}
         self.receiver_conns = []
 
-    def get_listener(self, broker):
+    def get_listener(self, broker, name):
         if self.listener is None:
-            self.listener = MessagingListener(broker, self.output_queue, logger=self.logger)
-        return self.listener
+            self.listener = {}
+        if name not in self.listener:
+            self.listener[name] = MessagingListener(broker, self.output_queue, name=name, logger=self.logger)
+        return self.listener[name]
 
     def subscribe(self):
         self.receiver_conns = self.connect_to_messaging_brokers()
 
         for name in self.receiver_conns:
             for conn in self.receiver_conns[name]:
-                self.logger.info('connecting to %s' % conn.transport._Transport__host_and_ports[0][0])
-                conn.set_listener('message-receiver', self.get_listener(conn.transport._Transport__host_and_ports[0]))
+                self.logger.info(f'connecting to {name}: {conn.transport._Transport__host_and_ports[0][0]}')
+                conn.set_listener('message-receiver', self.get_listener(conn.transport._Transport__host_and_ports[0], name))
                 conn.connect(self.channels[name]['username'], self.channels[name]['password'], wait=True)
                 conn.subscribe(destination=self.channels[name]['destination'], id='atlas-idds-messaging', ack='auto')
 
@@ -294,7 +314,7 @@ class MessagingReceiver(MessagingSender):
                     for name in self.receiver_conns:
                         for conn in self.receiver_conns[name]:
                             if not conn.is_connected():
-                                conn.set_listener('message-receiver', self.get_listener(conn.transport._Transport__host_and_ports[0]))
+                                conn.set_listener('message-receiver', self.get_listener(conn.transport._Transport__host_and_ports[0], name))
                                 # conn.start()
                                 conn.connect(self.channels[name]['username'], self.channels[name]['password'], wait=True)
                                 conn.subscribe(destination=self.channels[name]['destination'], id='atlas-idds-messaging', ack='auto')

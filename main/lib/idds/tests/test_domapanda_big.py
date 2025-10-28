@@ -45,8 +45,9 @@ if len(sys.argv) > 1 and sys.argv[1] == "in2p3":
     task_queue = 'CC-IN2P3_Rubin'
     task_queue1 = 'CC-IN2P3_Rubin_Medium'
     task_queue2 = 'CC-IN2P3_Rubin_Himem'
-    task_queue3 = 'CC-IN2P3_Rubin_Extra_Himem'
-    task_queue4 = 'CC-IN2P3_Rubin_Merge'
+    task_queue3 = 'CC-IN2P3_Rubin_Big_Himem'
+    task_queue4 = 'CC-IN2P3_Rubin_Extra_Himem'
+    task_queue5 = 'CC-IN2P3_Rubin_Merge'
 elif len(sys.argv) > 1 and sys.argv[1] == "lancs":
     site = 'lancs'
     task_cloud = 'EU'
@@ -54,9 +55,22 @@ elif len(sys.argv) > 1 and sys.argv[1] == "lancs":
     task_queue = 'LANCS_Rubin'
     task_queue1 = 'LANCS_Rubin_Medium'
     task_queue2 = 'LANCS_Rubin_Himem'
-    task_queue3 = 'LANCS_Rubin_Extra_Himem'
-    task_queue3 = 'LANCS_Rubin_Himem'
-    task_queue4 = 'LANCS_Rubin_Merge'
+    task_queue3 = 'LANCS_Rubin_Big_Himem'
+    task_queue4 = 'LANCS_Rubin_Extra_Himem'
+    # task_queue3 = 'LANCS_Rubin_Himem'
+    task_queue5 = 'LANCS_Rubin_Merge'
+elif len(sys.argv) > 1 and sys.argv[1] == "ral":
+    site = 'RAL'
+    task_cloud = 'EU'
+    # task_queue = 'RAL_TEST'
+    task_queue = 'RAL_Rubin'
+    task_queue1 = 'RAL_Rubin_Medium'
+    task_queue2 = 'RAL_Rubin_Himem'
+    task_queue3 = 'RAL_Rubin_Big_Himem'
+    # task_queue3 = 'RAL_Rubin_Himem'
+    task_queue4 = 'RAL_Rubin_Merge'
+    # task_queue5 = 'RAL_Rubin_IO'
+    task_queue5 = 'RAL_Rubin_Extra_Himem'
 else:
     site = 'slac'
     # task_cloud = 'LSST'
@@ -69,8 +83,9 @@ else:
     task_queue = 'SLAC_Rubin'
     task_queue1 = 'SLAC_Rubin_Medium'
     task_queue2 = 'SLAC_Rubin_Himem'
-    task_queue3 = 'SLAC_Rubin_Extra_Himem'
-    task_queue4 = 'SLAC_Rubin_Merge'
+    task_queue3 = 'SLAC_Rubin_Big_Himem'
+    task_queue4 = 'SLAC_Rubin_Extra_Himem'
+    task_queue5 = 'SLAC_Rubin_Merge'
     # task_queue = 'SLAC_Rubin_Extra_Himem_32Cores'
     # task_queue = 'SLAC_Rubin_Merge'
     # task_queue = 'SLAC_TEST'
@@ -182,7 +197,16 @@ def setup_workflow():
     taskN5.dependencies = [
         {"name": "00005" + str(k),
          "dependencies": [],
-         "submitted": False} for k in range(10000)
+         "submitted": False} for k in range(100)
+    ]
+
+    taskN6 = PanDATask()
+    taskN6.step = "step6"
+    taskN6.name = site + "_" + taskN5.step + "_" + randStr()
+    taskN6.dependencies = [
+        {"name": "00005" + str(k),
+         "dependencies": [],
+         "submitted": False} for k in range(100)
     ]
 
     work1 = DomaPanDAWork(executable='echo; sleep 180',
@@ -200,7 +224,7 @@ def setup_workflow():
                                     "type": "template",
                                     "value": "log.tgz"},
                           task_cloud=task_cloud)
-    work2 = DomaPanDAWork(executable='echo; sleep 180',
+    work2 = DomaPanDAWork(executable='echo; sleep 180',        # noqa F841
                           primary_input_collection={'scope': 'pseudo_dataset', 'name': 'pseudo_input_collection#2'},
                           output_collections=[{'scope': 'pseudo_dataset', 'name': 'pseudo_output_collection#2'}],
                           log_collections=[], dependency_map=taskN2.dependencies,
@@ -215,7 +239,7 @@ def setup_workflow():
                                     "type": "template",
                                     "value": "log.tgz"},
                           task_cloud=task_cloud)
-    work3 = DomaPanDAWork(executable='echo; sleep 180',
+    work3 = DomaPanDAWork(executable='echo; sleep 180',        # noqa F841
                           primary_input_collection={'scope': 'pseudo_dataset', 'name': 'pseudo_input_collection#3'},
                           output_collections=[{'scope': 'pseudo_dataset', 'name': 'pseudo_output_collection#3'}],
                           log_collections=[], dependency_map=taskN3.dependencies,
@@ -231,10 +255,10 @@ def setup_workflow():
                                     "value": "log.tgz"},
                           task_cloud=task_cloud)
 
-    work4 = DomaPanDAWork(executable='echo; sleep 180',
+    work4 = DomaPanDAWork(executable='echo; sleep 180',        # noqa F841
                           primary_input_collection={'scope': 'pseudo_dataset', 'name': 'pseudo_input_collection#1'},
                           output_collections=[{'scope': 'pseudo_dataset', 'name': 'pseudo_output_collection#1'}],
-                          log_collections=[], dependency_map=taskN1.dependencies,
+                          log_collections=[], dependency_map=taskN4.dependencies,
                           task_name=taskN4.name, task_queue=task_queue3,
                           encode_command_line=True,
                           task_priority=981,
@@ -247,11 +271,27 @@ def setup_workflow():
                                     "value": "log.tgz"},
                           task_cloud=task_cloud)
 
-    work5 = DomaPanDAWork(executable='echo; sleep 180',
+    work5 = DomaPanDAWork(executable='echo; sleep 180',        # noqa F841
                           primary_input_collection={'scope': 'pseudo_dataset', 'name': 'pseudo_input_collection#1'},
                           output_collections=[{'scope': 'pseudo_dataset', 'name': 'pseudo_output_collection#1'}],
-                          log_collections=[], dependency_map=taskN1.dependencies,
+                          log_collections=[], dependency_map=taskN5.dependencies,
                           task_name=taskN5.name, task_queue=task_queue4,
+                          encode_command_line=True,
+                          task_priority=981,
+                          prodSourceLabel='managed',
+                          task_log={"dataset": "PandaJob_#{pandaid}/",
+                                    "destination": "local",
+                                    "param_type": "log",
+                                    "token": "local",
+                                    "type": "template",
+                                    "value": "log.tgz"},
+                          task_cloud=task_cloud)
+
+    work6 = DomaPanDAWork(executable='echo; sleep 180',        # noqa F841
+                          primary_input_collection={'scope': 'pseudo_dataset', 'name': 'pseudo_input_collection#1'},
+                          output_collections=[{'scope': 'pseudo_dataset', 'name': 'pseudo_output_collection#1'}],
+                          log_collections=[], dependency_map=taskN6.dependencies,
+                          task_name=taskN6.name, task_queue=task_queue5,
                           encode_command_line=True,
                           task_priority=981,
                           prodSourceLabel='managed',
@@ -267,10 +307,13 @@ def setup_workflow():
     # pending_time = None
     workflow = Workflow(pending_time=pending_time)
     workflow.add_work(work1)
+    """
     workflow.add_work(work2)
     workflow.add_work(work3)
     workflow.add_work(work4)
     workflow.add_work(work5)
+    workflow.add_work(work6)
+    """
     workflow.name = site + "_" + 'test_workflow.idds.%s.test' % time.time()
     return workflow
 

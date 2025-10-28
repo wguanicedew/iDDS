@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2025
 
 import datetime
 import random
@@ -15,11 +15,12 @@ import traceback
 
 from idds.common import exceptions
 from idds.common.constants import (Sections, ReturnCode,
-                                   RequestStatus, RequestLocking,
+                                   RequestType, RequestStatus, RequestLocking,
+                                   TransformType, WorkflowType, ConditionStatus,
                                    TransformStatus, ProcessingStatus,
                                    ContentStatus, ContentRelationType,
                                    CommandType, CommandStatus, CommandLocking)
-from idds.common.utils import setup_logging, truncate_string
+from idds.common.utils import setup_logging, truncate_string, str_to_date
 from idds.core import (requests as core_requests,
                        transforms as core_transforms,
                        processings as core_processings,
@@ -28,11 +29,13 @@ from idds.core import (requests as core_requests,
                        commands as core_commands)
 from idds.agents.common.baseagent import BaseAgent
 from idds.agents.common.eventbus.event import (EventType,
-                                               NewRequestEvent,
+                                               # NewRequestEvent,
                                                UpdateRequestEvent,
-                                               AbortRequestEvent,
-                                               ResumeRequestEvent,
-                                               NewTransformEvent,
+                                               # AbortRequestEvent,
+                                               # CloseRequestEvent,
+                                               # ResumeRequestEvent,
+                                               # NewTransformEvent,
+                                               QueueTransformEvent,
                                                UpdateTransformEvent,
                                                AbortTransformEvent,
                                                ResumeTransformEvent,
@@ -49,7 +52,7 @@ class Clerk(BaseAgent):
     Clerk works to process requests and converts requests to transforms.
     """
 
-    def __init__(self, num_threads=1, max_number_workers=8, poll_period=10, retrieve_bulk_size=10, cache_expire_seconds=300, pending_time=None, **kwargs):
+    def __init__(self, num_threads=1, max_number_workers=8, poll_period=10, retrieve_bulk_size=3, cache_expire_seconds=300, pending_time=None, **kwargs):
         self.max_number_workers = max_number_workers
         self.set_max_workers()
         num_threads = self.max_number_workers
@@ -57,6 +60,8 @@ class Clerk(BaseAgent):
         self.poll_period = int(poll_period)
         self.retrieve_bulk_size = int(retrieve_bulk_size)
         self.config_section = Sections.Clerk
+        self.start_at = time.time()
+
         if pending_time:
             self.pending_time = float(pending_time)
         else:
@@ -125,16 +130,26 @@ class Clerk(BaseAgent):
 
         self.show_queue_size_time = None
 
+        if hasattr(self, 'clean_locks_time_period'):
+            self.clean_locks_time_period = int(self.clean_locks_time_period)
+        else:
+            self.clean_locks_time_period = 1800
+
     def is_ok_to_run_more_requests(self):
-        if self.number_workers >= self.max_number_workers:
-            return False
-        return True
+        if self.get_num_free_workers() > 0:
+            return True
+        return False
 
     def show_queue_size(self):
         if self.show_queue_size_time is None or time.time() - self.show_queue_size_time >= 600:
             self.show_queue_size_time = time.time()
-            q_str = "number of requests: %s, max number of requests: %s" % (self.number_workers, self.max_number_workers)
+            q_str = "min request_id: %s, number of requests: %s, max number of requests: %s" % (BaseAgent.min_request_id,
+                                                                                                self.get_num_workers(),
+                                                                                                self.get_max_workers())
             self.logger.debug(q_str)
+
+    def get_bulk_size(self):
+        return min(self.retrieve_bulk_size, self.get_num_free_workers())
 
     def get_new_requests(self):
         """
@@ -150,22 +165,46 @@ class Clerk(BaseAgent):
 
             self.show_queue_size()
 
+            if time.time() < self.start_at + 3600:
+                if BaseAgent.poll_new_min_request_id_times % 30 == 0:
+                    # get_new_requests is called every 10 seconds. 30 * 10 = 300 seconds, which is 5 minutes.
+                    if BaseAgent.min_request_id:
+                        min_request_id = BaseAgent.min_request_id - 1000
+                    else:
+                        min_request_id = None
+                else:
+                    min_request_id = BaseAgent.min_request_id
+            else:
+                if BaseAgent.poll_new_min_request_id_times % 180 == 0:
+                    # get_new_requests is called every 10 seconds. 180 * 10 = 300 seconds, which is 30 minutes.
+                    if BaseAgent.min_request_id:
+                        min_request_id = BaseAgent.min_request_id - 1000
+                    else:
+                        min_request_id = None
+                else:
+                    min_request_id = BaseAgent.min_request_id
+
+            BaseAgent.poll_new_min_request_id_times += 1
+
             req_status = [RequestStatus.New, RequestStatus.Extend, RequestStatus.Built, RequestStatus.Throttling]
             reqs_new = core_requests.get_requests_by_status_type(status=req_status, locking=True,
-                                                                 not_lock=True,
-                                                                 new_poll=True, only_return_id=True,
-                                                                 bulk_size=self.retrieve_bulk_size)
+                                                                 min_request_id=min_request_id,
+                                                                 bulk_size=self.get_bulk_size(),
+                                                                 new_poll=True, only_return_id=False)
 
             # self.logger.debug("Main thread get %s [New+Extend] requests to process" % len(reqs_new))
             if reqs_new:
-                self.logger.info("Main thread get [New+Extend] requests to process: %s" % str(reqs_new))
+                req_ids = [req["request_id"] for req in reqs_new]
+                self.logger.info("Main thread get [New+Extend] requests to process: %s" % str(req_ids))
 
-            events = []
-            for req_id in reqs_new:
-                event = NewRequestEvent(publisher_id=self.id, request_id=req_id)
-                events.append(event)
-            self.event_bus.send_bulk(events)
-
+            for req in reqs_new:
+                req_id = req["request_id"]
+                self.submit(self.process_new_request, **{"request": req})
+                BaseAgent.min_request_id_cache[req_id] = time.time()
+                if BaseAgent.min_request_id is None or BaseAgent.min_request_id > req_id:
+                    BaseAgent.min_request_id = req_id
+                    self.logger.info("new min_request_id: %s" % BaseAgent.min_request_id)
+                    core_requests.set_min_request_id(BaseAgent.min_request_id)
             return reqs_new
         except exceptions.DatabaseException as ex:
             if 'ORA-00060' in str(ex):
@@ -186,25 +225,53 @@ class Clerk(BaseAgent):
 
             self.show_queue_size()
 
+            if time.time() < self.start_at + 3600:
+                if BaseAgent.poll_running_min_request_id_times % 30 == 0:
+                    # get_new_requests is called every 10 seconds. 30 * 10 = 300 seconds, which is 5 minutes.
+                    if BaseAgent.min_request_id:
+                        min_request_id = BaseAgent.min_request_id - 1000
+                    else:
+                        min_request_id = None
+                else:
+                    min_request_id = BaseAgent.min_request_id
+            else:
+                if BaseAgent.poll_running_min_request_id_times % 180 == 0:
+                    # get_new_requests is called every 10 seconds. 180 * 10 = 1800 seconds, which is 30 minutes.
+                    if BaseAgent.min_request_id:
+                        min_request_id = BaseAgent.min_request_id - 1000
+                    else:
+                        min_request_id = None
+                else:
+                    min_request_id = BaseAgent.min_request_id
+
+            BaseAgent.poll_running_min_request_id_times += 1
+
             req_status = [RequestStatus.Transforming, RequestStatus.ToCancel, RequestStatus.Cancelling,
                           RequestStatus.ToSuspend, RequestStatus.Suspending,
                           RequestStatus.ToExpire, RequestStatus.Expiring,
                           RequestStatus.ToFinish, RequestStatus.ToForceFinish,
                           RequestStatus.ToResume, RequestStatus.Resuming,
-                          RequestStatus.Building]
+                          RequestStatus.Building, RequestStatus.ToClose]
             reqs = core_requests.get_requests_by_status_type(status=req_status, time_period=None,
-                                                             locking=True, bulk_size=self.retrieve_bulk_size,
-                                                             not_lock=True, update_poll=True, only_return_id=True)
+                                                             min_request_id=min_request_id,
+                                                             locking=True,
+                                                             bulk_size=self.get_bulk_size(),
+                                                             update_poll=True, only_return_id=False)
 
             # self.logger.debug("Main thread get %s Transforming requests to running" % len(reqs))
             if reqs:
-                self.logger.info("Main thread get Transforming requests to running: %s" % str(reqs))
+                req_ids = [req["request_id"] for req in reqs]
+                self.logger.info("Main thread get Transforming requests to running: %s" % str(req_ids))
 
-            events = []
-            for req_id in reqs:
-                event = UpdateRequestEvent(publisher_id=self.id, request_id=req_id)
-                events.append(event)
-            self.event_bus.send_bulk(events)
+            for req in reqs:
+                req_id = req["request_id"]
+                self.submit(self.process_update_request, **{"request": req})
+
+                BaseAgent.min_request_id_cache[req_id] = time.time()
+                if BaseAgent.min_request_id is None or BaseAgent.min_request_id > req_id:
+                    BaseAgent.min_request_id = req_id
+                    self.logger.info("new min_request_id: %s" % BaseAgent.min_request_id)
+                    core_requests.set_min_request_id(BaseAgent.min_request_id)
 
             return reqs
         except exceptions.DatabaseException as ex:
@@ -240,30 +307,30 @@ class Clerk(BaseAgent):
             update_commands = []
             for cmd in commands:
                 request_id = cmd['request_id']
-                cmd_content = cmd['cmd_content']
+                # cmd_content = cmd['cmd_content']
                 cmd_type = cmd['cmd_type']
                 cmd_status = cmd['status']
-                event_content = {'request_id': request_id,
-                                 'cmd_type': cmd_type,
-                                 'cmd_id': cmd['cmd_id'],
-                                 'cmd_content': cmd_content}
 
-                event = None
+                if BaseAgent.min_request_id is None or BaseAgent.min_request_id > request_id:
+                    BaseAgent.min_request_id = request_id
+                    self.logger.info("new min_request_id: %s" % BaseAgent.min_request_id)
+                    BaseAgent.min_request_id_cache[request_id] = time.time()
+                    core_requests.set_min_request_id(BaseAgent.min_request_id)
+
                 if cmd_status in [CommandStatus.New, CommandStatus.Processing]:
-                    if cmd_type in [CommandType.AbortRequest]:
-                        event = AbortRequestEvent(publisher_id=self.id, request_id=request_id, content=event_content)
-                    elif cmd_type in [CommandType.ResumeRequest]:
-                        event = ResumeRequestEvent(publisher_id=self.id, request_id=request_id, content=event_content)
-                # elif cmd_status in [CommandStatus.Processing]:
-                #     event = UpdateRequestEvent(publisher_id=self.id, request_id=request_id, content=event_content)
+                    req = self.get_request(request_id, status=None, locking=True)
+                    if req:
+                        if cmd_type in [CommandType.AbortRequest]:
+                            self.submit(self.process_abort_request, **{"request": req, "command": cmd["cmd_id"]})
+                        elif cmd_type in [CommandType.ResumeRequest]:
+                            self.submit(self.process_resume_request, **{"request": req, "command": cmd["cmd_id"]})
+                        elif cmd_type in [CommandType.CloseRequest]:
+                            self.submit(self.process_close_request, **{"request": req, "command": cmd["cmd_id"]})
 
-                if event:
-                    self.event_bus.send(event)
-
-                    u_command = {'cmd_id': cmd['cmd_id'],
-                                 'status': CommandStatus.Processing,
-                                 'locking': CommandLocking.Idle}
-                    update_commands.append(u_command)
+                        u_command = {'cmd_id': cmd['cmd_id'],
+                                     'status': CommandStatus.Processing,
+                                     'locking': CommandLocking.Idle}
+                        update_commands.append(u_command)
                 else:
                     u_command = {'cmd_id': cmd['cmd_id'],
                                  'status': CommandStatus.UnknownCommand,
@@ -279,6 +346,32 @@ class Clerk(BaseAgent):
                 self.logger.error(ex)
                 self.logger.error(traceback.format_exc())
         return []
+
+    def clean_min_request_id(self):
+        try:
+            if BaseAgent.checking_min_request_id_times <= 0:
+                old_min_request_id = core_requests.get_min_request_id()
+                self.logger.info("old_min_request_id: %s" % old_min_request_id)
+                if not old_min_request_id:
+                    min_request_id = 0
+                else:
+                    min_request_id = old_min_request_id - 1000
+                BaseAgent.min_request_id = min_request_id
+            else:
+                for req_id in list(BaseAgent.min_request_id_cache.keys()):
+                    time_stamp = BaseAgent.min_request_id_cache[req_id]
+                    if time_stamp < time.time() - 12 * 3600:       # older than 12 hours
+                        del BaseAgent.min_request_id_cache[req_id]
+
+                if BaseAgent.min_request_id_cache:
+                    min_request_id = min(list(BaseAgent.min_request_id_cache.keys()))
+                    BaseAgent.min_request_id = min_request_id
+                    core_requests.set_min_request_id(BaseAgent.min_request_id)
+
+            BaseAgent.checking_min_request_id_times += 1
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
 
     def get_request(self, request_id, status=None, locking=False):
         try:
@@ -311,11 +404,14 @@ class Clerk(BaseAgent):
                 work_tag_attribute_value = int(getattr(self, work_tag_attribute))
         return work_tag_attribute_value
 
-    def generate_transform(self, req, work, build=False):
-        if build:
-            wf = req['request_metadata']['build_workflow']
+    def generate_transform(self, req, work, build=False, iworkflow=False):
+        if iworkflow:
+            wf = None
         else:
-            wf = req['request_metadata']['workflow']
+            if build:
+                wf = req['request_metadata']['build_workflow']
+            else:
+                wf = req['request_metadata']['workflow']
 
         work.set_request_id(req['request_id'])
         work.username = req['username']
@@ -339,13 +435,88 @@ class Clerk(BaseAgent):
             else:
                 max_update_retries = self.max_update_retries
 
+        transform_type = TransformType.Workflow
+        try:
+            work_type = work.get_work_type()
+            if build:
+                # todo
+                # transform_type = TransformType.BuildWork
+                pass
+            elif work_type in [WorkflowType.iWorkflowLocal]:
+                # no need to generate transform
+                return None
+            elif work_type in [WorkflowType.iWorkflow]:
+                transform_type = TransformType.iWorkflow
+            elif work_type in [WorkflowType.iWork]:
+                transform_type = TransformType.iWork
+            elif work_type in [WorkflowType.GenericWorkflow]:
+                transform_type = TransformType.GenericWorkflow
+            elif work_type in [WorkflowType.GenericWork]:
+                transform_type = TransformType.GenericWork
+        except Exception:
+            pass
+
+        has_previous_conditions = None
+        try:
+            if hasattr(work, 'get_previous_conditions'):
+                work_previous_conditions = work.get_previous_conditions()
+            if work_previous_conditions:
+                has_previous_conditions = len(work_previous_conditions)
+        except Exception:
+            pass
+
+        triggered_conditions = []
+        untriggered_conditions = []
+        try:
+            if hasattr(work, 'get_following_conditions'):
+                following_conditions = work.get_following_conditions()
+                for cond in following_conditions:
+                    untriggered_conditions.append(cond)
+        except Exception:
+            pass
+
+        loop_index = None
+        try:
+            if hasattr(work, 'get_loop_index'):
+                loop_index = work.get_loop_index()
+        except Exception:
+            pass
+
+        # transform_status = TransformStatus.New
+        transform_status = TransformStatus.Queue
+        if has_previous_conditions:
+            transform_status = TransformStatus.WaitForTrigger
+
+        site = req['site']
+        if not site:
+            try:
+                cloud = None
+                if hasattr(work, 'task_cloud') and work.task_cloud:
+                    cloud = work.task_cloud
+
+                if hasattr(work, 'task_queue') and work.task_queue:
+                    queue = work.task_queue
+                elif hasattr(work, 'queue') and work.queue:
+                    queue = work.queue
+                else:
+                    queue = None
+
+                task_site = None
+                if hasattr(work, 'task_site') and work.task_site:
+                    task_site = work.task_site
+                site = f"{cloud},{task_site},{queue}"
+            except Exception:
+                pass
+
         new_transform = {'request_id': req['request_id'],
                          'workload_id': req['workload_id'],
-                         'transform_type': work.get_work_type(),
+                         'transform_type': transform_type,
                          'transform_tag': work.get_work_tag(),
                          'priority': req['priority'],
-                         'status': TransformStatus.New,
+                         'status': transform_status,
                          'retries': 0,
+                         'parent_transform_id': None,
+                         'previous_transform_id': None,
                          'name': work.get_work_name(),
                          'new_poll_period': self.new_poll_period,
                          'update_poll_period': self.update_poll_period,
@@ -353,6 +524,13 @@ class Clerk(BaseAgent):
                          'max_update_retries': max_update_retries,
                          # 'expired_at': req['expired_at'],
                          'expired_at': None,
+                         'internal_id': work.internal_id,
+                         'parent_internal_id': None if not work.parent_internal_ids else ",".join(work.parent_internal_ids),
+                         'has_previous_conditions': has_previous_conditions,
+                         'triggered_conditions': triggered_conditions,
+                         'untriggered_conditions': untriggered_conditions,
+                         'loop_index': loop_index,
+                         'site': site,
                          'transform_metadata': {'internal_id': work.get_internal_id(),
                                                 'template_work_id': work.get_template_work_id(),
                                                 'sequence_id': work.get_sequence_id(),
@@ -364,6 +542,26 @@ class Clerk(BaseAgent):
                          }
 
         return new_transform
+
+    def generate_condition(self, req, cond):
+        previous_works = cond.previous_works
+        following_works = cond.following_works
+        previous_transforms, following_transforms = [], []
+        previous_transforms = previous_works
+        following_transforms = following_works
+
+        new_condition = {'request_id': req['request_id'],
+                         'internal_id': cond.internal_id,
+                         'status': ConditionStatus.WaitForTrigger,
+                         'substatus': None,
+                         'is_loop': False,
+                         'loop_index': None,
+                         'cloned_from': None,
+                         'evaluate_result': None,
+                         'previous_transforms': previous_transforms,
+                         'following_transforms': following_transforms,
+                         'condition': {'condition': cond}}
+        return new_condition
 
     def get_num_active_requests(self, site_name):
         cache = get_redis_cache()
@@ -500,6 +698,9 @@ class Clerk(BaseAgent):
         return throttlers
 
     def whether_to_throttle(self, request):
+        # disable throttler in clerk. throttler will run in transformer
+        return False
+
         try:
             site = request['site']
             if site is None:
@@ -582,7 +783,8 @@ class Clerk(BaseAgent):
                     # new_work.create_processing()
 
                     transform = self.generate_transform(req, work)
-                    transforms.append(transform)
+                    if transform:
+                        transforms.append(transform)
                 self.logger.debug(log_pre + "Processing request(%s): new transforms: %s" % (req['request_id'],
                                                                                             str(transforms)))
                 # processing_metadata = req['processing_metadata']
@@ -620,6 +822,123 @@ class Clerk(BaseAgent):
                                       'errors': req['errors'] if req['errors'] else {}}}
             ret_req['parameters']['errors'].update(error)
             self.logger.warn(log_pre + "Handle new request error result: %s" % str(ret_req))
+        return ret_req
+
+    def handle_new_irequest(self, req):
+        try:
+            log_pre = self.get_log_prefix(req)
+            self.logger.info(log_pre + "Handle new irequest")
+            to_throttle = self.whether_to_throttle(req)
+            if to_throttle:
+                ret_req = {'request_id': req['request_id'],
+                           'parameters': {'status': RequestStatus.Throttling,
+                                          'locking': RequestLocking.Idle}}
+                ret_req['parameters'] = self.load_poll_period(req, ret_req['parameters'], throttling=True)
+                self.logger.info(log_pre + "Throttle new irequest result: %s" % str(ret_req))
+            else:
+                workflow = req['request_metadata']['workflow']
+
+                transforms = []
+                transform = self.generate_transform(req, workflow)
+                if transform:
+                    transforms.append(transform)
+                self.logger.debug(log_pre + "Processing request(%s): new transforms: %s" % (req['request_id'],
+                                                                                            str(transforms)))
+                ret_req = {'request_id': req['request_id'],
+                           'parameters': {'status': RequestStatus.Transforming,
+                                          'locking': RequestLocking.Idle},
+                           'new_transforms': transforms}
+                ret_req['parameters'] = self.load_poll_period(req, ret_req['parameters'])
+                self.logger.info(log_pre + "Handle new irequest result: %s" % str(ret_req))
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
+            retries = req['new_retries'] + 1
+            if not req['max_new_retries'] or retries < req['max_new_retries']:
+                req_status = req['status']
+            else:
+                req_status = RequestStatus.Failed
+
+            # increase poll period
+            new_poll_period = int(req['new_poll_period'].total_seconds() * self.poll_period_increase_rate)
+            if new_poll_period > self.max_new_poll_period:
+                new_poll_period = self.max_new_poll_period
+
+            error = {'submit_err': {'msg': truncate_string('%s' % (ex), length=200)}}
+
+            ret_req = {'request_id': req['request_id'],
+                       'parameters': {'status': req_status,
+                                      'locking': RequestLocking.Idle,
+                                      'new_retries': retries,
+                                      'new_poll_period': new_poll_period,
+                                      'errors': req['errors'] if req['errors'] else {}}}
+            ret_req['parameters']['errors'].update(error)
+            self.logger.warn(log_pre + "Handle new irequest error result: %s" % str(ret_req))
+        return ret_req
+
+    def handle_new_generic_request(self, req):
+        try:
+            log_pre = self.get_log_prefix(req)
+            self.logger.info(log_pre + "Handle new generic request")
+            to_throttle = self.whether_to_throttle(req)
+            if to_throttle:
+                ret_req = {'request_id': req['request_id'],
+                           'parameters': {'status': RequestStatus.Throttling,
+                                          'locking': RequestLocking.Idle}}
+                ret_req['parameters'] = self.load_poll_period(req, ret_req['parameters'], throttling=True)
+                self.logger.info(log_pre + "Throttle new generic request result: %s" % str(ret_req))
+            else:
+                workflow = req['request_metadata']['workflow']
+
+                transforms = []
+                works = workflow.get_works()
+                for w in works:
+                    # todo
+                    # set has_previous_conditions, has_conditions, all_conditions_triggered(False), cloned_from(None)
+                    transform = self.generate_transform(req, w)
+                    if transform:
+                        transforms.append(transform)
+                self.logger.debug(log_pre + f"Processing request({req['request_id']}): new transforms: {transforms}")
+
+                conds = workflow.get_conditions()
+                conditions = []
+                for cond in conds:
+                    condition = self.generate_condition(req, cond)
+                    if condition:
+                        conditions.append(condition)
+                self.logger.debug(log_pre + f"Processing request({req['request_id']}), new conditions: {conditions}")
+
+                ret_req = {'request_id': req['request_id'],
+                           'parameters': {'status': RequestStatus.Transforming,
+                                          'locking': RequestLocking.Idle},
+                           'new_transforms': transforms,
+                           'new_conditions': conditions}
+                ret_req['parameters'] = self.load_poll_period(req, ret_req['parameters'])
+                self.logger.info(log_pre + "Handle new generic request result: %s" % str(ret_req))
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
+            retries = req['new_retries'] + 1
+            if not req['max_new_retries'] or retries < req['max_new_retries']:
+                req_status = req['status']
+            else:
+                req_status = RequestStatus.Failed
+
+            # increase poll period
+            new_poll_period = int(req['new_poll_period'].total_seconds() * self.poll_period_increase_rate)
+            if new_poll_period > self.max_new_poll_period:
+                new_poll_period = self.max_new_poll_period
+
+            error = {'submit_err': {'msg': truncate_string('%s' % (ex), length=200)}}
+
+            ret_req = {'request_id': req['request_id'],
+                       'parameters': {'status': req_status,
+                                      'locking': RequestLocking.Idle,
+                                      'new_retries': retries,
+                                      'new_poll_period': new_poll_period,
+                                      'errors': req['errors'] if req['errors'] else {}}}
+            ret_req['parameters']['errors'].update(error)
+            self.logger.warn(log_pre + "Handle new irequest error result: %s" % str(ret_req))
         return ret_req
 
     def has_to_build_work(self, req):
@@ -688,7 +1007,7 @@ class Clerk(BaseAgent):
             self.logger.warn(log_pre + "Handle build request error result: %s" % str(ret_req))
         return ret_req
 
-    def update_request(self, req):
+    def update_request(self, req, origin_req=None):
         new_tf_ids, update_tf_ids = [], []
         try:
             log_pre = self.get_log_prefix(req)
@@ -706,6 +1025,16 @@ class Clerk(BaseAgent):
             else:
                 update_transforms = {}
 
+            if 'new_conditions' in req:
+                new_conditions = req['new_conditions']
+            else:
+                new_conditions = []
+
+            if origin_req:
+                origin_status = origin_req['status']
+            else:
+                origin_status = None
+
             retry = True
             retry_num = 0
             while retry:
@@ -713,8 +1042,10 @@ class Clerk(BaseAgent):
                 retry_num += 1
                 try:
                     _, new_tf_ids, update_tf_ids = core_requests.update_request_with_transforms(req['request_id'], req['parameters'],
+                                                                                                origin_status=origin_status,
                                                                                                 new_transforms=new_transforms,
-                                                                                                update_transforms=update_transforms)
+                                                                                                update_transforms=update_transforms,
+                                                                                                new_conditions=new_conditions)
                 except exceptions.DatabaseException as ex:
                     if 'ORA-00060' in str(ex):
                         self.logger.warn("(cx_Oracle.DatabaseError) ORA-00060: deadlock detected while waiting for resource")
@@ -745,42 +1076,92 @@ class Clerk(BaseAgent):
                     req_parameters['update_retries'] = req['parameters']['update_retries']
                 if 'errors' in req['parameters']:
                     req_parameters['errors'] = req['parameters']['errors']
+
+                if origin_req:
+                    origin_status = origin_req['status']
+                else:
+                    origin_status = None
+
                 self.logger.warn(log_pre + "Update request in exception: %s" % str(req_parameters))
-                core_requests.update_request_with_transforms(req['request_id'], req_parameters)
+                core_requests.update_request_with_transforms(req['request_id'], req_parameters, origin_status=origin_status)
             except Exception as ex:
                 self.logger.error(ex)
                 self.logger.error(traceback.format_exc())
         return new_tf_ids, update_tf_ids
 
-    def process_new_request(self, event):
+    def process_new_request(self, event=None, request=None):
         self.number_workers += 1
         try:
-            if event:
+            if request is None and event:
                 # req_status = [RequestStatus.New, RequestStatus.Extend, RequestStatus.Built]
                 req_status = [RequestStatus.New, RequestStatus.Extend, RequestStatus.Built, RequestStatus.Throttling]
                 req = self.get_request(request_id=event._request_id, status=req_status, locking=True)
                 if not req:
                     self.logger.error("Cannot find request for event: %s" % str(event))
-                elif req:
-                    log_pre = self.get_log_prefix(req)
-                    if self.has_to_build_work(req):
-                        ret = self.handle_build_request(req)
-                    else:
-                        ret = self.handle_new_request(req)
-                    new_tf_ids, update_tf_ids = self.update_request(ret)
-                    for tf_id in new_tf_ids:
-                        self.logger.info(log_pre + "NewTransformEvent(transform_id: %s)" % str(tf_id))
-                        event = NewTransformEvent(publisher_id=self.id, transform_id=tf_id)
-                        self.event_bus.send(event)
-                        time.sleep(1)
-                    for tf_id in update_tf_ids:
-                        self.logger.info(log_pre + "UpdateTransformEvent(transform_id: %s)" % str(tf_id))
-                        event = UpdateTransformEvent(publisher_id=self.id, transform_id=tf_id)
-                        self.event_bus.send(event)
+                request = req
+
+            if request:
+                req = request
+                log_pre = self.get_log_prefix(req)
+                self.logger.info(f"{log_pre} process_new_request request: {req['request_id']} event: {event}")
+                if self.has_to_build_work(req):
+                    ret = self.handle_build_request(req)
+                elif req['request_type'] in [RequestType.iWorkflow, RequestType.iWorkflowLocal]:
+                    ret = self.handle_new_irequest(req)
+                elif req['request_type'] in [RequestType.GenericWorkflow]:
+                    ret = self.handle_new_generic_request(req)
+                else:
+                    ret = self.handle_new_request(req)
+                new_tf_ids, update_tf_ids = self.update_request(ret, origin_req=req)
+                for tf_id in new_tf_ids:
+                    # self.logger.info(log_pre + "NewTransformEvent(transform_id: %s)" % str(tf_id))
+                    # event = NewTransformEvent(publisher_id=self.id, transform_id=tf_id)
+                    self.logger.info(log_pre + "QueueTransformEvent(transform_id: %s)" % str(tf_id))
+                    event = QueueTransformEvent(publisher_id=self.id, transform_id=tf_id)
+                    self.event_bus.send(event)
+                    # time.sleep(1)
+                for tf_id in update_tf_ids:
+                    self.logger.info(log_pre + "UpdateTransformEvent(transform_id: %s)" % str(tf_id))
+                    event = UpdateTransformEvent(publisher_id=self.id, transform_id=tf_id)
+                    self.event_bus.send(event)
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
         self.number_workers -= 1
+
+    def get_workflow_status(self, wf, tf_statuses, has_new_transforms, to_abort):
+        if has_new_transforms:
+            return RequestStatus.Transforming
+        terminated_status = [
+            TransformStatus.Finished,
+            TransformStatus.SubFinished,
+            TransformStatus.Failed,
+            TransformStatus.Cancelled,
+            TransformStatus.Suspended,
+            TransformStatus.Expired,
+            TransformStatus.Built
+        ]
+        finished_status = [TransformStatus.Finished]
+        failed_status = [
+            TransformStatus.Failed,
+            TransformStatus.Cancelled,
+            TransformStatus.Suspended,
+            TransformStatus.Expired,
+        ]
+
+        all_terminated = all(status in terminated_status for status in tf_statuses)
+        all_finished = all(status in finished_status for status in tf_statuses)
+        all_failed = all(status in failed_status for status in tf_statuses)
+
+        if all_finished:
+            return RequestStatus.Finished
+        elif all_failed:
+            return RequestStatus.Failed
+        elif all_terminated:
+            if to_abort:
+                return RequestStatus.Cancelled
+            return RequestStatus.SubFinished
+        return RequestStatus.Transforming
 
     def handle_update_request_real(self, req, event):
         """
@@ -810,30 +1191,78 @@ class Clerk(BaseAgent):
         # current works
         works = wf.get_all_works()
         # print(works)
+        all_released_work_status = []
         for work in works:
             # print(work.get_work_id())
-            tf = core_transforms.get_transform(transform_id=work.get_work_id())
-            if tf:
-                transform_work = tf['transform_metadata']['work']
-                # work_status = WorkStatus(tf['status'].value)
-                # work.set_status(work_status)
-                work.sync_work_data(status=tf['status'], substatus=tf['substatus'], work=transform_work, workload_id=tf['workload_id'])
-                self.logger.info(log_pre + "transform status: %s, work status: %s" % (tf['status'], work.status))
-        wf.refresh_works()
+            found_match_works = False
+            if work.get_work_id():
+                tf = core_transforms.get_transform(transform_id=work.get_work_id(), request_id=req['request_id'])
+                if tf:
+                    all_released_work_status.append(tf['status'])
+                    transform_work = tf['transform_metadata']['work']
+                    # work_status = WorkStatus(tf['status'].value)
+                    # work.set_status(work_status)
+                    work.sync_work_data(status=tf['status'], substatus=tf['substatus'], work=transform_work, workload_id=tf['workload_id'])
+                    self.logger.info(log_pre + "transform status: %s, work status: %s" % (tf['status'], work.status))
+                    found_match_works = True
+            if not found_match_works:
+                tfs = core_transforms.get_transforms(request_id=req['request_id'], internal_ids=work.internal_id, loop_index=work.get_loop_index())
+                if not tfs:
+                    self.logger.info(f"{log_pre} Found transforms with request_id {req['request_id']} internal_ids [{work.internal_id}]: {tfs}")
+                else:
+                    tf_ids = [tf['transform_id'] for tf in tfs]
+                    self.logger.info(f"{log_pre} Found transforms with request_id {req['request_id']} internal_ids [{work.internal_id}]: {tf_ids}")
+                if len(tfs) == 1:
+                    tf = tfs[0]
+                    all_released_work_status.append(tf['status'])
+                    transform_work = tf['transform_metadata']['work']
+                    if transform_work.internal_id == work.internal_id:
+                        if hasattr(work, 'set_work_id'):
+                            work.set_work_id(tf['transform_id'], transforming=True)
+                        work.sync_work_data(status=tf['status'], substatus=tf['substatus'], work=transform_work, workload_id=tf['workload_id'])
+                        self.logger.info(log_pre + "transform status: %s, work status: %s" % (tf['status'], work.status))
+                    else:
+                        all_released_work_status.append(None)
+                else:
+                    all_released_work_status.append(None)
+
+        wf.refresh_works(clean=True)
 
         new_transforms = []
-        if req['status'] in [RequestStatus.Transforming] and not wf.to_cancel:
+        self.logger.info(log_pre + f"request status: {req['status']} and to_cancel: {wf.to_cancel}")
+        # if req['status'] in [RequestStatus.Transforming] and not wf.to_cancel:
+        # To let the last final task to be submitted
+        # if req['status'] in [RequestStatus.Transforming]:
+        has_new_transforms = False
+        if True:
             # new works
             works = wf.get_new_works()
             for work in works:
-                # new_work = work.copy()
-                new_work = work
-                new_work.add_proxy(wf.get_proxy())
-                new_transform = self.generate_transform(req, new_work)
-                new_transforms.append(new_transform)
+                tfs = core_transforms.get_transforms(request_id=req['request_id'], internal_ids=work.internal_id, loop_index=work.get_loop_index())
+                if not tfs:
+                    self.logger.info(f"{log_pre} Found transforms for new work with request_id {req['request_id']} internal_ids [{work.internal_id}]: {tfs}")
+                else:
+                    tf_ids = [tf['transform_id'] for tf in tfs]
+                    self.logger.info(f"{log_pre} Found transforms for new work with request_id {req['request_id']} internal_ids [{work.internal_id}]: {tf_ids}")
+                if len(tfs) == 1:
+                    tf = tfs[0]
+                    transform_work = tf['transform_metadata']['work']
+                    if transform_work.internal_id == work.internal_id:
+                        if hasattr(work, 'set_work_id'):
+                            work.set_work_id(tf['transform_id'], transforming=True)
+                        work.sync_work_data(status=tf['status'], substatus=tf['substatus'], work=transform_work, workload_id=tf['workload_id'])
+                        self.logger.info(log_pre + "transform status: %s, work status: %s" % (tf['status'], work.status))
+                else:
+                    has_new_transforms = True
+                    # new_work = work.copy()
+                    new_work = work
+                    new_work.add_proxy(wf.get_proxy())
+                    new_transform = self.generate_transform(req, new_work)
+                    new_transforms.append(new_transform)
             self.logger.debug(log_pre + " Processing request(%s): new transforms: %s" % (req['request_id'], str(new_transforms)))
 
-        req_status = RequestStatus.Transforming
+        req_status = self.get_workflow_status(wf, all_released_work_status, has_new_transforms, to_abort)
+        """
         if wf.is_terminated():
             if wf.is_finished(synchronize=False):
                 req_status = RequestStatus.Finished
@@ -848,8 +1277,10 @@ class Clerk(BaseAgent):
                     req_status = RequestStatus.Failed
                 else:
                     req_status = RequestStatus.Failed
+
             # req_msg = wf.get_terminated_msg()
-        else:
+        """
+        if req_status in [RequestStatus.Transforming]:
             if wf.is_to_expire(req['expired_at'], self.pending_time, request_id=req['request_id']):
                 wf.expired = True
                 event_content = {'request_id': req['request_id'],
@@ -896,6 +1327,7 @@ class Clerk(BaseAgent):
         # current works
         works = wf.get_all_works()
         # print(works)
+        finished_build_transforms = []
         for work in works:
             # print(work.get_work_id())
             tf = core_transforms.get_transform(transform_id=work.get_work_id())
@@ -905,6 +1337,8 @@ class Clerk(BaseAgent):
                 # work.set_status(work_status)
                 work.sync_work_data(status=tf['status'], substatus=tf['substatus'], work=transform_work, workload_id=tf['workload_id'])
                 self.logger.info(log_pre + "transform status: %s, work status: %s" % (tf['status'], work.status))
+                if tf['status'] in [TransformStatus.Finished]:
+                    finished_build_transforms.append(tf['transform_id'])
         wf.refresh_works()
 
         new_transforms = []
@@ -922,7 +1356,10 @@ class Clerk(BaseAgent):
         req_status = RequestStatus.Building
         if wf.is_terminated():
             if wf.is_finished(synchronize=False):
-                req_status = RequestStatus.Failed
+                if finished_build_transforms:
+                    req_status = RequestStatus.Built
+                else:
+                    req_status = RequestStatus.Failed
             else:
                 if to_abort and not to_abort_transform_id:
                     req_status = RequestStatus.Cancelled
@@ -991,14 +1428,114 @@ class Clerk(BaseAgent):
                                       'errors': req['errors'] if req['errors'] else {}}}
             ret_req['parameters']['errors'].update(error)
             log_pre = self.get_log_prefix(req)
-            self.logger.warn(log_pre + "Handle new request exception result: %s" % str(ret_req))
+            self.logger.warn(log_pre + "Handle update request exception result: %s" % str(ret_req))
         return ret_req
 
-    def process_update_request(self, event):
+    def is_to_expire(self, expired_at=None, pending_time=None, request_id=None):
+        if expired_at:
+            if type(expired_at) in [str]:
+                expired_at = str_to_date(expired_at)
+            if expired_at < datetime.datetime.utcnow():
+                self.logger.info("Request(%s) expired_at(%s) is smaller than utc now(%s), expiring" % (request_id,
+                                                                                                       expired_at,
+                                                                                                       datetime.datetime.utcnow()))
+                return True
+        return False
+
+    def handle_update_irequest_real(self, req, event):
+        """
+        process running request
+        """
+        log_pre = self.get_log_prefix(req)
+        self.logger.info(log_pre + " handle_update_irequest: request_id: %s" % req['request_id'])
+
+        tfs = core_transforms.get_transforms(request_id=req['request_id'])
+        total_tfs, finished_tfs, subfinished_tfs, failed_tfs = 0, 0, 0, 0
+        for tf in tfs:
+            total_tfs += 1
+            if tf['status'] in [TransformStatus.Finished, TransformStatus.Built]:
+                finished_tfs += 1
+            elif tf['status'] in [TransformStatus.SubFinished]:
+                subfinished_tfs += 1
+            elif tf['status'] in [TransformStatus.Failed, TransformStatus.Cancelled,
+                                  TransformStatus.Suspended, TransformStatus.Expired]:
+                failed_tfs += 1
+
+        req_status = RequestStatus.Transforming
+        if req['request_type'] in [RequestType.iWorkflowLocal]:
+            workflow = req['request_metadata'].get('workflow', None)
+            if workflow and req['created_at'] + datetime.timedelta(seconds=workflow.max_walltime) < datetime.datetime.utcnow():
+                req_status = RequestStatus.Finished
+        else:
+            if total_tfs == finished_tfs:
+                req_status = RequestStatus.Finished
+            elif total_tfs == finished_tfs + subfinished_tfs + failed_tfs:
+                if finished_tfs + subfinished_tfs > 0:
+                    req_status = RequestStatus.SubFinished
+                else:
+                    req_status = RequestStatus.Failed
+
+        log_msg = log_pre + "ireqeust %s status: %s" % (req['request_id'], req_status)
+        log_msg = log_msg + "(transforms: total %s, finished: %s, subfinished: %s, failed %s)" % (total_tfs, finished_tfs, subfinished_tfs, failed_tfs)
+        self.logger.debug(log_msg)
+
+        if req_status not in [RequestStatus.Finished, RequestStatus.SubFinished, RequestStatus.Failed]:
+            if self.is_to_expire(req['expired_at'], self.pending_time, request_id=req['request_id']):
+                event_content = {'request_id': req['request_id'],
+                                 'cmd_type': CommandType.ExpireRequest,
+                                 'cmd_content': {}}
+                self.logger.debug(log_pre + "ExpireRequestEvent(request_id: %s)" % req['request_id'])
+                event = ExpireRequestEvent(publisher_id=self.id, request_id=req['request_id'], content=event_content)
+                self.event_bus.send(event)
+
+        parameters = {'status': req_status,
+                      'locking': RequestLocking.Idle,
+                      'request_metadata': req['request_metadata']
+                      }
+        parameters = self.load_poll_period(req, parameters)
+
+        ret = {'request_id': req['request_id'],
+               'parameters': parameters}
+        self.logger.info(log_pre + "Handle update irequest result: %s" % str(ret))
+        return ret
+
+    def handle_update_irequest(self, req, event):
+        """
+        process running irequest
+        """
+        try:
+            ret_req = self.handle_update_irequest_real(req, event)
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
+            retries = req['update_retries'] + 1
+            if not req['max_update_retries'] or retries < req['max_update_retries']:
+                req_status = req['status']
+            else:
+                req_status = RequestStatus.Failed
+            error = {'update_err': {'msg': truncate_string('%s' % (ex), length=200)}}
+
+            # increase poll period
+            update_poll_period = int(req['update_poll_period'].total_seconds() * self.poll_period_increase_rate)
+            if update_poll_period > self.max_update_poll_period:
+                update_poll_period = self.max_update_poll_period
+
+            ret_req = {'request_id': req['request_id'],
+                       'parameters': {'status': req_status,
+                                      'locking': RequestLocking.Idle,
+                                      'update_retries': retries,
+                                      'update_poll_period': update_poll_period,
+                                      'errors': req['errors'] if req['errors'] else {}}}
+            ret_req['parameters']['errors'].update(error)
+            log_pre = self.get_log_prefix(req)
+            self.logger.warn(log_pre + "Handle update irequest exception result: %s" % str(ret_req))
+        return ret_req
+
+    def process_update_request(self, event=None, request=None):
         self.number_workers += 1
         pro_ret = ReturnCode.Ok.value
         try:
-            if event:
+            if request is None and event:
                 # req_status = [RequestStatus.Transforming, RequestStatus.ToCancel, RequestStatus.Cancelling,
                 #               RequestStatus.ToSuspend, RequestStatus.Suspending,
                 #               RequestStatus.ToExpire, RequestStatus.Expiring,
@@ -1007,22 +1544,35 @@ class Clerk(BaseAgent):
                 #               RequestStatus.Building]
 
                 # req = self.get_request(request_id=event._request_id, status=req_status, locking=True)
+                self.logger.debug("process_update_request: event: %s" % str(event))
                 req = self.get_request(request_id=event._request_id, locking=True)
                 if not req:
                     self.logger.error("Cannot find request for event: %s" % str(event))
-                    pro_ret = ReturnCode.Locked.value
+                    # pro_ret = ReturnCode.Locked.value
+                    pro_ret = ReturnCode.Ok.value
                 else:
-                    log_pre = self.get_log_prefix(req)
+                    request = req
+
+            if request:
+                req = request
+                log_pre = self.get_log_prefix(req)
+                self.logger.info(f"{log_pre} process_update_request request: {req['request_id']} event: {event}")
+
+                if req['request_type'] in [RequestType.iWorkflow, RequestType.iWorkflowLocal]:
+                    ret = self.handle_update_irequest(req, event=event)
+                else:
                     ret = self.handle_update_request(req, event=event)
-                    new_tf_ids, update_tf_ids = self.update_request(ret)
-                    for tf_id in new_tf_ids:
-                        self.logger.info(log_pre + "NewTransformEvent(transform_id: %s)" % tf_id)
-                        event = NewTransformEvent(publisher_id=self.id, transform_id=tf_id, content=event._content)
-                        self.event_bus.send(event)
-                    for tf_id in update_tf_ids:
-                        self.logger.info(log_pre + "UpdateTransformEvent(transform_id: %s)" % tf_id)
-                        event = UpdateTransformEvent(publisher_id=self.id, transform_id=tf_id, content=event._content)
-                        self.event_bus.send(event)
+                new_tf_ids, update_tf_ids = self.update_request(ret, origin_req=req)
+                for tf_id in new_tf_ids:
+                    # self.logger.info(log_pre + "NewTransformEvent(transform_id: %s)" % tf_id)
+                    # event = NewTransformEvent(publisher_id=self.id, transform_id=tf_id, content=event._content)
+                    self.logger.info(log_pre + "QueueTransformEvent(transform_id: %s)" % str(tf_id))
+                    event = QueueTransformEvent(publisher_id=self.id, transform_id=tf_id)
+                    self.event_bus.send(event)
+                for tf_id in update_tf_ids:
+                    self.logger.info(log_pre + "UpdateTransformEvent(transform_id: %s)" % tf_id)
+                    event = UpdateTransformEvent(publisher_id=self.id, transform_id=tf_id, content=event._content if event else None)
+                    self.event_bus.send(event)
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
@@ -1064,6 +1614,7 @@ class Clerk(BaseAgent):
 
             ret_req = {'request_id': req['request_id'],
                        'parameters': {'status': req_status,
+                                      'substatus': RequestStatus.ToCancel,
                                       'locking': RequestLocking.Idle,
                                       'request_metadata': req['request_metadata']},
                        }
@@ -1081,7 +1632,7 @@ class Clerk(BaseAgent):
             self.logger.info(log_pre + "handle_abort_request exception result: %s" % str(ret_req))
         return ret_req
 
-    def handle_command(self, event, cmd_status, errors=None):
+    def handle_command(self, event, cmd_status=None, command=None, errors=None):
         if (event and event._content and 'cmd_id' in event._content and event._content['cmd_id']):
             u_command = {'cmd_id': event._content['cmd_id'],
                          'status': cmd_status,
@@ -1089,35 +1640,206 @@ class Clerk(BaseAgent):
             if errors:
                 u_command['errors'] = errors
             core_commands.update_commands([u_command])
+        if command:
+            u_command = {'cmd_id': command,
+                         'status': cmd_status,
+                         'locking': CommandLocking.Idle}
+            if errors:
+                u_command['errors'] = errors
+            core_commands.update_commands([u_command])
 
-    def process_abort_request(self, event):
+    def process_abort_request(self, event=None, request=None, command=None):
         self.number_workers += 1
         pro_ret = ReturnCode.Ok.value
         try:
-            if event:
+            if request is None and event:
                 req = self.get_request(request_id=event._request_id, locking=True)
                 if not req:
-                    self.logger.error("Cannot find request for event: %s" % str(event))
+                    self.logger.warn("Cannot find request for event: %s" % str(event))
                     pro_ret = ReturnCode.Locked.value
                 else:
-                    log_pre = self.get_log_prefix(req)
-                    self.logger.info(log_pre + "process_abort_request event: %s" % str(event))
+                    request = req
+            if request:
+                req = request
+                log_pre = self.get_log_prefix(req)
+                self.logger.info(log_pre + f"process_abort_request request: {req['request_id']}, event: {event}, command: {command}")
 
-                    if req['status'] in [RequestStatus.Finished, RequestStatus.SubFinished,
-                                         RequestStatus.Failed, RequestStatus.Cancelled,
-                                         RequestStatus.Suspended, RequestStatus.Expired]:
-                        ret = {'request_id': req['request_id'],
-                               'parameters': {'locking': RequestLocking.Idle,
-                                              'errors': {'extra_msg': "Request is already terminated. Cannot be aborted"}}}
-                        if req['errors'] and 'msg' in req['errors']:
-                            ret['parameters']['errors']['msg'] = req['errors']['msg']
-                        self.logger.info(log_pre + "process_abort_request result: %s" % str(ret))
-                        self.update_request(ret)
-                        self.handle_command(event, cmd_status=CommandStatus.Failed, errors="Request is already terminated. Cannot be aborted")
+                if req['status'] in [RequestStatus.Finished, RequestStatus.SubFinished,
+                                     RequestStatus.Failed, RequestStatus.Cancelled,
+                                     RequestStatus.Suspended, RequestStatus.Expired]:
+                    ret = {'request_id': req['request_id'],
+                           'parameters': {'locking': RequestLocking.Idle,
+                                          'command': CommandType.AbortRequest,
+                                          'errors': {'extra_msg': "Request is already terminated. Cannot be aborted"}}}
+                    if req['errors'] and 'msg' in req['errors']:
+                        ret['parameters']['errors']['msg'] = req['errors']['msg']
+                    self.logger.info(log_pre + "process_abort_request result: %s" % str(ret))
+                    self.update_request(ret, origin_req=req)
+                    self.handle_command(event, command=command, cmd_status=CommandStatus.Processed, errors="Request is already terminated. Cannot be aborted")
+                elif req['request_type'] in [RequestType.iWorkflow, RequestType.iWorkflowLocal]:
+                    ret = self.handle_close_irequest(req, event=event)
+                    self.update_request(ret, origin_req=req)
+
+                    # self.handle_command(event, cmd_status=CommandStatus.Failed, errors="Not support abortion for iWorkflow")
+                    self.handle_command(event, command=command, cmd_status=CommandStatus.Processed, errors=None)
+                else:
+                    ret = self.handle_abort_request(req, event)
+                    self.logger.info(log_pre + "process_abort_request result: %s" % str(ret))
+                    self.update_request(ret, origin_req=req)
+
+                    core_transforms.abort_resume_transforms(request_id=req['request_id'], abort=True)
+                    core_processings.abort_resume_processings(request_id=req['request_id'], abort=True)
+
+                    to_abort_transform_id = None
+                    if event and event._content and event._content['cmd_content'] and 'transform_id' in event._content['cmd_content']:
+                        to_abort_transform_id = event._content['cmd_content']['transform_id']
+
+                    if req['status'] in [RequestStatus.Building]:
+                        wf = req['request_metadata']['build_workflow']
                     else:
+                        if 'workflow' in req['request_metadata']:
+                            wf = req['request_metadata']['workflow']
+                        else:
+                            wf = req['request_metadata']['build_workflow']
+                    works = wf.get_all_works()
+                    if works:
+                        has_abort_work = False
+                        for work in works:
+                            if (work.is_started() or work.is_starting()) and not work.is_terminated():
+                                if not to_abort_transform_id or to_abort_transform_id == work.get_work_id():
+                                    self.logger.info(log_pre + "AbortTransformEvent(transform_id: %s)" % str(work.get_work_id()))
+                                    event = AbortTransformEvent(publisher_id=self.id,
+                                                                transform_id=work.get_work_id(),
+                                                                content=event._content if event else None)
+                                    self.event_bus.send(event)
+                                    has_abort_work = True
+                        if not has_abort_work:
+                            self.logger.info(log_pre + "not has abort work")
+                            self.logger.info(log_pre + "UpdateRequestEvent(request_id: %s)" % str(req['request_id']))
+                            event = UpdateRequestEvent(publisher_id=self.id, request_id=req['request_id'], content=event._content if event else None)
+                            self.event_bus.send(event)
+                    else:
+                        # no works. should trigger update request
+                        self.logger.info(log_pre + "UpdateRequestEvent(request_id: %s)" % str(req['request_id']))
+                        event = UpdateRequestEvent(publisher_id=self.id, request_id=req['request_id'], content=event._content if event else None)
+                        self.event_bus.send(event)
+
+                    self.handle_command(event, command=command, cmd_status=CommandStatus.Processed, errors=None)
+        except AssertionError as ex:
+            self.logger.error("process_abort_request, Failed to process event: %s" % str(event))
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
+            self.handle_command(event, command=command, cmd_status=CommandStatus.Processed, errors=str(ex))
+            pro_ret = ReturnCode.Failed.value
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
+            pro_ret = ReturnCode.Failed.value
+        self.number_workers -= 1
+        return pro_ret
+
+    def handle_close_irequest(self, req, event):
+        """
+        process close irequest
+        """
+        try:
+            log_pre = self.get_log_prefix(req)
+            self.logger.info(log_pre + "handle_close_irequest event: %s" % str(event))
+
+            tfs = core_transforms.get_transforms(request_id=req['request_id'])
+            total_tfs, finished_tfs, subfinished_tfs, failed_tfs = 0, 0, 0, 0
+            for tf in tfs:
+                total_tfs += 1
+                if tf['status'] in [TransformStatus.Finished, TransformStatus.Built]:
+                    finished_tfs += 1
+                elif tf['status'] in [TransformStatus.SubFinished]:
+                    subfinished_tfs += 1
+                elif tf['status'] in [TransformStatus.Failed, TransformStatus.Cancelled,
+                                      TransformStatus.Suspended, TransformStatus.Expired]:
+                    failed_tfs += 1
+                else:
+                    event = AbortTransformEvent(publisher_id=self.id,
+                                                transform_id=tf['transform_id'],
+                                                content=event._content if event else None)
+                    self.event_bus.send(event)
+
+            req_status = RequestStatus.Transforming
+            if req['request_type'] in [RequestType.iWorkflowLocal] and total_tfs == 0:
+                req_status = RequestStatus.Finished
+            else:
+                if total_tfs == finished_tfs:
+                    req_status = RequestStatus.Finished
+                elif total_tfs == finished_tfs + subfinished_tfs + failed_tfs:
+                    if finished_tfs + subfinished_tfs > 0:
+                        req_status = RequestStatus.SubFinished
+                    else:
+                        req_status = RequestStatus.Failed
+
+            log_msg = log_pre + "ireqeust %s status: %s" % (req['request_id'], req_status)
+            log_msg = log_msg + "(transforms: total %s, finished: %s, subfinished: %s, failed %s)" % (total_tfs, finished_tfs, subfinished_tfs, failed_tfs)
+            self.logger.debug(log_msg)
+
+            parameters = {'status': req_status,
+                          'substatus': RequestStatus.ToClose,
+                          'locking': RequestLocking.Idle,
+                          'request_metadata': req['request_metadata']
+                          }
+            parameters = self.load_poll_period(req, parameters)
+
+            ret = {'request_id': req['request_id'],
+                   'parameters': parameters}
+            self.logger.info(log_pre + "Handle close irequest result: %s" % str(ret))
+            return ret
+
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
+            error = {'close_err': {'msg': truncate_string('%s' % (ex), length=200)}}
+            ret_req = {'request_id': req['request_id'],
+                       'parameters': {'status': RequestStatus.ToClose,
+                                      'locking': RequestLocking.Idle,
+                                      'errors': req['errors'] if req['errors'] else {}}}
+            ret_req['parameters']['errors'].update(error)
+            self.logger.info(log_pre + "handle_close_irequest exception result: %s" % str(ret_req))
+        return ret_req
+
+    def process_close_request(self, event=None, request=None, command=None):
+        self.number_workers += 1
+        pro_ret = ReturnCode.Ok.value
+        try:
+            if request is None and event:
+                req = self.get_request(request_id=event._request_id, locking=True)
+                if not req:
+                    self.logger.warn("Cannot find request for event: %s" % str(event))
+                    pro_ret = ReturnCode.Locked.value
+                else:
+                    request = req
+            if request:
+                req = request
+                log_pre = self.get_log_prefix(req)
+                self.logger.info(log_pre + f"process_close_request request: {req['request_id']} event: {event}")
+
+                if req['status'] in [RequestStatus.Finished, RequestStatus.SubFinished,
+                                     RequestStatus.Failed, RequestStatus.Cancelled,
+                                     RequestStatus.Suspended, RequestStatus.Expired]:
+                    ret = {'request_id': req['request_id'],
+                           'parameters': {'locking': RequestLocking.Idle,
+                                          'command': CommandType.CloseRequest,
+                                          'errors': {'extra_msg': "Request is already terminated. Cannot be closed"}}}
+                    if req['errors'] and 'msg' in req['errors']:
+                        ret['parameters']['errors']['msg'] = req['errors']['msg']
+                    self.logger.info(log_pre + "process_abort_request result: %s" % str(ret))
+                    self.update_request(ret, origin_req=req)
+                    self.handle_command(event, command=command, cmd_status=CommandStatus.Failed, errors="Request is already terminated. Cannot be closed")
+                else:
+                    if req['request_type'] in [RequestType.iWorkflow, RequestType.iWorkflowLocal]:
+                        ret = self.handle_close_irequest(req, event=event)
+                        self.update_request(ret, origin_req=req)
+                    else:
+                        pass
                         ret = self.handle_abort_request(req, event)
                         self.logger.info(log_pre + "process_abort_request result: %s" % str(ret))
-                        self.update_request(ret)
+                        self.update_request(ret, origin_req=req)
                         to_abort_transform_id = None
                         if event and event._content and event._content['cmd_content'] and 'transform_id' in event._content['cmd_content']:
                             to_abort_transform_id = event._content['cmd_content']['transform_id']
@@ -1138,26 +1860,26 @@ class Clerk(BaseAgent):
                                         self.logger.info(log_pre + "AbortTransformEvent(transform_id: %s)" % str(work.get_work_id()))
                                         event = AbortTransformEvent(publisher_id=self.id,
                                                                     transform_id=work.get_work_id(),
-                                                                    content=event._content)
+                                                                    content=event._content if event else None)
                                         self.event_bus.send(event)
                                         has_abort_work = True
                             if not has_abort_work:
                                 self.logger.info(log_pre + "not has abort work")
                                 self.logger.info(log_pre + "UpdateRequestEvent(request_id: %s)" % str(req['request_id']))
-                                event = UpdateRequestEvent(publisher_id=self.id, request_id=req['request_id'], content=event._content)
+                                event = UpdateRequestEvent(publisher_id=self.id, request_id=req['request_id'], content=event._content if event else None)
                                 self.event_bus.send(event)
                         else:
                             # no works. should trigger update request
                             self.logger.info(log_pre + "UpdateRequestEvent(request_id: %s)" % str(req['request_id']))
-                            event = UpdateRequestEvent(publisher_id=self.id, request_id=req['request_id'], content=event._content)
+                            event = UpdateRequestEvent(publisher_id=self.id, request_id=req['request_id'], content=event._content if event else None)
                             self.event_bus.send(event)
 
-                        self.handle_command(event, cmd_status=CommandStatus.Processed, errors=None)
+                    self.handle_command(event, command=command, cmd_status=CommandStatus.Processed, errors=None)
         except AssertionError as ex:
-            self.logger.error("process_abort_request, Failed to process event: %s" % str(event))
+            self.logger.error("process_close_request, Failed to process event: %s" % str(event))
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
-            self.handle_command(event, cmd_status=CommandStatus.Processed, errors=str(ex))
+            self.handle_command(event, command=command, cmd_status=CommandStatus.Processed, errors=str(ex))
             pro_ret = ReturnCode.Failed.value
         except Exception as ex:
             self.logger.error(ex)
@@ -1165,6 +1887,47 @@ class Clerk(BaseAgent):
             pro_ret = ReturnCode.Failed.value
         self.number_workers -= 1
         return pro_ret
+
+    def handle_resume_irequest(self, req, event):
+        """
+        process resume irequest
+        """
+        try:
+            log_pre = self.get_log_prefix(req)
+            self.logger.info(log_pre + "handle_resume_irequest event: %s" % str(event))
+
+            tfs = core_transforms.get_transforms(request_id=req['request_id'])
+            for tf in tfs:
+                if tf['status'] in [TransformStatus.Finished, TransformStatus.Built]:
+                    continue
+                else:
+                    event = ResumeTransformEvent(publisher_id=self.id,
+                                                 transform_id=tf['transform_id'],
+                                                 content=event._content if event else None)
+                    self.event_bus.send(event)
+
+            parameters = {'status': RequestStatus.Transforming,
+                          'substatus': RequestStatus.ToResume,
+                          'locking': RequestLocking.Idle,
+                          'request_metadata': req['request_metadata']
+                          }
+            parameters = self.load_poll_period(req, parameters)
+
+            ret = {'request_id': req['request_id'],
+                   'parameters': parameters}
+            self.logger.info(log_pre + "Handle resume irequest result: %s" % str(ret))
+            return ret
+        except Exception as ex:
+            self.logger.error(ex)
+            self.logger.error(traceback.format_exc())
+            error = {'close_err': {'msg': truncate_string('%s' % (ex), length=200)}}
+            ret_req = {'request_id': req['request_id'],
+                       'parameters': {'status': RequestStatus.ToClose,
+                                      'locking': RequestLocking.Idle,
+                                      'errors': req['errors'] if req['errors'] else {}}}
+            ret_req['parameters']['errors'].update(error)
+            self.logger.info(log_pre + "handle_close_irequest exception result: %s" % str(ret_req))
+        return ret_req
 
     def handle_resume_request(self, req):
         """
@@ -1175,8 +1938,13 @@ class Clerk(BaseAgent):
 
             processing_metadata = req['processing_metadata']
 
-            wf = req['request_metadata']['workflow']
-            wf.resume_works()
+            if 'workflow' in req['request_metadata'] and req['request_metadata']['workflow'] is not None:
+                wf = req['request_metadata']['workflow']
+                wf.resume_works()
+            elif 'build_workflow' in req['request_metadata'] and req['request_metadata']['build_workflow'] is not None:
+                req_status = RequestStatus.Building
+            else:
+                req_status = RequestStatus.Failed
 
             ret_req = {'request_id': req['request_id'],
                        'parameters': {'status': req_status,
@@ -1196,34 +1964,44 @@ class Clerk(BaseAgent):
             ret_req['parameters']['errors'].update(error)
         return ret_req
 
-    def process_resume_request(self, event):
+    def process_resume_request(self, event=None, request=None, command=None):
         self.number_workers += 1
         pro_ret = ReturnCode.Ok.value
         try:
-            if event:
+            if request is None and event:
                 req = self.get_request(request_id=event._request_id, locking=True)
                 if not req:
                     self.logger.error("Cannot find request for event: %s" % str(event))
                     pro_ret = ReturnCode.Locked.value
                 else:
-                    log_pre = self.get_log_prefix(req)
-                    self.logger.info(log_pre + "process_resume_request event: %s" % str(event))
+                    request = req
+            if request:
+                req = request
+                log_pre = self.get_log_prefix(req)
+                self.logger.info(log_pre + f"process_resume_request request: {req['request_id']} event: {event}")
 
-                    if req['status'] in [RequestStatus.Finished]:
-                        ret = {'request_id': req['request_id'],
-                               'parameters': {'locking': RequestLocking.Idle,
-                                              'errors': {'extra_msg': "Request is already finished. Cannot be resumed"}}}
-                        if req['errors'] and 'msg' in req['errors']:
-                            ret['parameters']['errors']['msg'] = req['errors']['msg']
-                        self.logger.info(log_pre + "process_resume_request result: %s" % str(ret))
+                if req['status'] in [RequestStatus.Finished]:
+                    ret = {'request_id': req['request_id'],
+                           'parameters': {'locking': RequestLocking.Idle,
+                                          'command': CommandType.ResumeRequest,
+                                          'errors': {'extra_msg': "Request is already finished. Cannot be resumed"}}}
+                    if req['errors'] and 'msg' in req['errors']:
+                        ret['parameters']['errors']['msg'] = req['errors']['msg']
+                    self.logger.info(log_pre + "process_resume_request result: %s" % str(ret))
 
-                        self.update_request(ret)
-                        self.handle_command(event, cmd_status=CommandStatus.Failed, errors="Request is already finished. Cannot be resumed")
-                    else:
-                        ret = self.handle_resume_request(req)
-                        self.logger.info(log_pre + "process_resume_request result: %s" % str(ret))
+                    self.update_request(ret, origin_req=req)
+                    self.handle_command(event, command=command, cmd_status=CommandStatus.Failed, errors="Request is already finished. Cannot be resumed")
+                elif req['request_type'] in [RequestType.iWorkflow, RequestType.iWorkflowLocal]:
+                    ret = self.handle_resume_irequest(req)
+                    self.update_request(ret, origin_req=req)
+                    # self.handle_command(event, cmd_status=CommandStatus.Failed, errors="Not support to reusme for iWorkflow")
+                    self.handle_command(event, command=command, cmd_status=CommandStatus.Processed, errors=None)
+                else:
+                    ret = self.handle_resume_request(req)
+                    self.logger.info(log_pre + "process_resume_request result: %s" % str(ret))
 
-                        self.update_request(ret)
+                    self.update_request(ret, origin_req=req)
+                    if 'workflow' in req['request_metadata']:
                         wf = req['request_metadata']['workflow']
                         works = wf.get_all_works()
                         if works:
@@ -1232,14 +2010,17 @@ class Clerk(BaseAgent):
                                 self.logger.info(log_pre + "ResumeTransformEvent(transform_id: %s)" % str(work.get_work_id()))
                                 event = ResumeTransformEvent(publisher_id=self.id,
                                                              transform_id=work.get_work_id(),
-                                                             content=event._content)
+                                                             content=event._content if event else None)
                                 self.event_bus.send(event)
                         else:
                             self.logger.info(log_pre + "UpdateRequestEvent(request_id: %s)" % str(req['request_id']))
-                            event = UpdateRequestEvent(publisher_id=self.id, request_id=req['request_id'], content=event._content)
+                            event = UpdateRequestEvent(publisher_id=self.id, request_id=req['request_id'], content=event._content if event else None)
                             self.event_bus.send(event)
 
-                        self.handle_command(event, cmd_status=CommandStatus.Processed, errors=None)
+                    core_transforms.abort_resume_transforms(request_id=req['request_id'], resume=True)
+                    core_processings.abort_resume_processings(request_id=req['request_id'], resume=True)
+
+                    self.handle_command(event, command=command, cmd_status=CommandStatus.Processed, errors=None)
         except Exception as ex:
             self.logger.error(ex)
             self.logger.error(traceback.format_exc())
@@ -1247,9 +2028,17 @@ class Clerk(BaseAgent):
         self.number_workers -= 1
         return pro_ret
 
-    def clean_locks(self):
-        self.logger.info("clean locking")
-        core_requests.clean_locking()
+    def clean_locks(self, force=False):
+        try:
+            self.logger.info(f"clean locking: force: {force}")
+            health_items = self.get_health_items()
+            min_request_id = BaseAgent.min_request_id
+            hostname, pid, thread_id, thread_name = self.get_process_thread_info()
+            core_requests.clean_locking(health_items=health_items, min_request_id=min_request_id,
+                                        time_period=self.clean_locks_time_period,
+                                        force=force, hostname=hostname, pid=pid)
+        except Exception as ex:
+            self.logger.info(f"Failed clean locking: {ex}")
 
     def init_event_function_map(self):
         self.event_func_map = {
@@ -1272,6 +2061,10 @@ class Clerk(BaseAgent):
             EventType.ResumeRequest: {
                 'pre_check': self.is_ok_to_run_more_requests,
                 'exec_func': self.process_resume_request
+            },
+            EventType.CloseRequest: {
+                'pre_check': self.is_ok_to_run_more_requests,
+                'exec_func': self.process_close_request
             }
         }
 
@@ -1286,6 +2079,7 @@ class Clerk(BaseAgent):
             self.load_plugins()
 
             self.add_default_tasks()
+            self.clean_locks(force=True)
 
             self.init_event_function_map()
 
@@ -1295,7 +2089,9 @@ class Clerk(BaseAgent):
             self.add_task(task)
             task = self.create_task(task_func=self.get_operation_requests, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=10, priority=1)
             self.add_task(task)
-            task = self.create_task(task_func=self.clean_locks, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=1800, priority=1)
+            task = self.create_task(task_func=self.clean_min_request_id, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=3600, priority=1)
+            self.add_task(task)
+            task = self.create_task(task_func=self.clean_locks, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=60, priority=1)
             self.add_task(task)
 
             self.execute()

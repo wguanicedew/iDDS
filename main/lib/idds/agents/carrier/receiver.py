@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2025
 
 import time
 import threading
@@ -30,6 +30,7 @@ from idds.agents.common.eventbus.event import (EventType, MessageEvent,
                                                TriggerProcessingEvent)
 
 from .utils import handle_messages_processing
+from .iutils import handle_messages_asyncresult
 
 setup_logging(__name__)
 
@@ -40,13 +41,15 @@ class Receiver(BaseAgent):
     """
 
     def __init__(self, receiver_num_threads=8, num_threads=1, bulk_message_delay=30, bulk_message_size=2000,
-                 random_delay=None, update_processing_interval=300, mode='single', **kwargs):
-        super(Receiver, self).__init__(num_threads=receiver_num_threads, name='Receiver', **kwargs)
+                 random_delay=None, use_process_pool=False, update_processing_interval=300, mode='single',
+                 separate_logger=False, **kwargs):
+        super(Receiver, self).__init__(num_threads=receiver_num_threads, name='Receiver', use_process_pool=use_process_pool, **kwargs)
         self.config_section = Sections.Carrier
         self.bulk_message_delay = int(bulk_message_delay)
         self.bulk_message_size = int(bulk_message_size)
         self.message_queue = Queue()
-        self.logger = get_logger(self.__class__.__name__)
+        if separate_logger:
+            self.logger = get_logger(self.__class__.__name__)
         self.update_processing_interval = update_processing_interval
         if self.update_processing_interval:
             self.update_processing_interval = int(self.update_processing_interval)
@@ -100,7 +103,7 @@ class Receiver(BaseAgent):
 
     def get_output_messages(self):
         with self._lock:
-            msgs = []
+            msgs = {}
             try:
                 msg_size = 0
                 while not self.message_queue.empty():
@@ -108,7 +111,13 @@ class Receiver(BaseAgent):
                     if msg:
                         if msg_size < 10:
                             self.logger.debug("Received message(only log first 10 messages): %s" % str(msg))
-                        msgs.append(msg)
+                        name = msg['name']
+                        # headers = msg['headers']
+                        # body = msg['body']
+                        # from_idds = msg['from_idds']
+                        if name not in msgs:
+                            msgs[name] = []
+                        msgs[name].append(msg)
                         msg_size += 1
                         if msg_size >= self.bulk_message_size:
                             break
@@ -116,7 +125,10 @@ class Receiver(BaseAgent):
                 self.logger.error("Failed to get output messages: %s, %s" % (error, traceback.format_exc()))
             if msgs:
                 total_msgs = self.get_num_queued_messages()
-                self.logger.info("process_messages: Get %s messages, left %s messages" % (len(msgs), total_msgs))
+                got_msgs = 0
+                for name in msgs:
+                    got_msgs += len(msgs[name])
+                self.logger.info("process_messages: Get %s messages, left %s messages" % (got_msgs, total_msgs))
             return msgs
 
     def is_selected(self):
@@ -143,7 +155,10 @@ class Receiver(BaseAgent):
         self.add_task(task)
 
     def handle_messages(self, output_messages, log_prefix):
-        ret_msg_handle = handle_messages_processing(output_messages,
+        output_messages_new = []
+        for msg in output_messages:
+            output_messages_new.append(msg['msg']['body'])
+        ret_msg_handle = handle_messages_processing(output_messages_new,
                                                     logger=self.logger,
                                                     log_prefix=log_prefix,
                                                     update_processing_interval=self.update_processing_interval)
@@ -161,6 +176,7 @@ class Receiver(BaseAgent):
             core_catalog.add_contents_update(update_contents)
             num_to_update_contents = len(update_contents)
 
+        pr_id_triggered = []
         for pr_id in update_processings_by_job:
             # self.logger.info(log_prefix + "TerminatedProcessingEvent(processing_id: %s)" % pr_id)
             # event = TerminatedProcessingEvent(publisher_id=self.id, processing_id=pr_id)
@@ -168,8 +184,11 @@ class Receiver(BaseAgent):
             self.logger.info(log_prefix + "TriggerProcessingEvent(processing_id: %s)" % pr_id)
             event = TriggerProcessingEvent(publisher_id=self.id, processing_id=pr_id)
             self.event_bus.send(event)
+            pr_id_triggered.append(pr_id)
 
         for pr_id in update_processings:
+            if pr_id in pr_id_triggered:
+                continue
             # self.logger.info(log_prefix + "TerminatedProcessingEvent(processing_id: %s)" % pr_id)
             # event = TerminatedProcessingEvent(publisher_id=self.id, processing_id=pr_id)
             self.logger.info(log_prefix + "TriggerProcessingEvent(processing_id: %s)" % pr_id)
@@ -177,21 +196,38 @@ class Receiver(BaseAgent):
                                            content={'num_to_update_contents': num_to_update_contents})
             event.set_has_updates()
             self.event_bus.send(event)
+            pr_id_triggered.append(pr_id)
 
         for pr_id in terminated_processings:
+            if pr_id in pr_id_triggered:
+                continue
             self.logger.info(log_prefix + "TriggerProcessingEvent(processing_id: %s)" % pr_id)
             event = TriggerProcessingEvent(publisher_id=self.id,
                                            processing_id=pr_id,
                                            content={'Terminated': True, 'source': 'Receiver'})
             event.set_terminating()
             self.event_bus.send(event)
+            pr_id_triggered.append(pr_id)
+
+    def handle_messages_asyncresult(self, output_messages, log_prefix):
+        handle_messages_asyncresult(output_messages,
+                                    logger=self.logger,
+                                    log_prefix=log_prefix,
+                                    update_processing_interval=self.update_processing_interval)
+
+    def handle_messages_channels(self, output_messages, log_prefix):
+        for channel in output_messages:
+            if channel in ['asyncresult', 'AsyncResult']:
+                self.handle_messages_asyncresult(output_messages[channel], log_prefix)
+            else:
+                self.handle_messages(output_messages[channel], log_prefix)
 
     def process_messages(self, log_prefix=None):
         output_messages = self.get_output_messages()
         has_messages = False
         if output_messages:
             self.logger.info("process_messages: Received %s messages" % (len(output_messages)))
-            self.handle_messages(output_messages, log_prefix=log_prefix)
+            self.handle_messages_channels(output_messages, log_prefix=log_prefix)
             self.logger.info("process_messages: Handled %s messages" % len(output_messages))
             has_messages = True
         return has_messages
@@ -219,7 +255,7 @@ class Receiver(BaseAgent):
                 output_messages = event.get_message()
                 if output_messages:
                     self.logger.info("process_messages: Received %s messages" % (len(output_messages)))
-                    self.handle_messages(output_messages, log_prefix=self.log_prefix)
+                    self.handle_messages_channels(output_messages, log_prefix=self.log_prefix)
                     self.logger.info("process_messages: Handled %s messages" % len(output_messages))
         except Exception as ex:
             self.logger.error(ex)
@@ -245,6 +281,9 @@ class Receiver(BaseAgent):
 
             self.add_default_tasks()
 
+            task = self.create_task(task_func=self.load_min_request_id, task_output_queue=None, task_args=tuple(), task_kwargs={}, delay_time=600, priority=1)
+            self.add_task(task)
+
             if self.mode == "single":
                 self.logger.debug("single mode")
                 self.add_receiver_monitor_task()
@@ -267,6 +306,7 @@ class Receiver(BaseAgent):
                     self.execute_schedules()
 
                     if not time_start or time.time() > time_start + self.bulk_message_delay:
+                        self.logger.info(f"is_selected: {self.is_selected()}, is_receiver_started: {self.is_receiver_started()}")
                         if self.is_selected():
                             if not self.is_receiver_started():
                                 self.resume_receiver()
@@ -279,7 +319,9 @@ class Receiver(BaseAgent):
                         msg = self.get_output_messages()
                         if msg:
                             event = MessageEvent(message=msg)
-                            self.event_bus.send(event)
+                            # self.event_bus.send(event)
+                            # self.process_messages_event(event)
+                            self.submit(self.process_messages_event, **{"event": event})
 
                     self.graceful_stop.wait(0.00001)
                 except IDDSException as error:

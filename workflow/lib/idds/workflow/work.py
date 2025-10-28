@@ -620,6 +620,9 @@ class Work(Base):
     def get_sequence_id(self):
         return self.sequence_id
 
+    def get_site(self):
+        return None
+
     @property
     def internal_id(self):
         return self.get_metadata_item('internal_id')
@@ -1419,6 +1422,14 @@ class Work(Base):
         *** Function called by Transformer agent.
         """
         if self.status in [WorkStatus.SubFinished] and self.substatus not in [WorkStatus.ToCancel, WorkStatus.ToSuspend, WorkStatus.ToResume]:
+            return True
+        return False
+
+    def is_processed(self, synchronize=True):
+        """
+        *** Function called by Transformer agent.
+        """
+        if self.status in [WorkStatus.Finished, WorkStatus.SubFinished] and self.substatus not in [WorkStatus.ToCancel, WorkStatus.ToSuspend, WorkStatus.ToResume]:
             return True
         return False
 

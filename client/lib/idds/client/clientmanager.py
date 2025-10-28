@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2020 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2020 - 2025
 
 
 """
@@ -32,14 +32,15 @@ except ImportError:
 
 
 from idds.common.authentication import OIDCAuthentication, OIDCAuthenticationUtils
-from idds.common.utils import setup_logging, get_proxy_path
+from idds.common.utils import setup_logging, get_proxy_path, idds_mask
 
 from idds.client.version import release_version
 from idds.client.client import Client
 from idds.common import exceptions
 from idds.common.config import (get_local_cfg_file, get_local_config_root,
                                 get_local_config_value, get_main_config_file)
-from idds.common.constants import RequestType, RequestStatus
+from idds.common.constants import (WorkflowType, RequestType, RequestStatus,
+                                   TransformType, TransformStatus)
 # from idds.common.utils import get_rest_host, exception_handler
 from idds.common.utils import exception_handler
 
@@ -70,11 +71,16 @@ class ClientManager:
 
         self.enable_json_outputs = False
 
+        self.max_request_length = 400000000    # 400M
+        self.request_cache = "/tmp/idds"
+
         self.configuration = ConfigParser.ConfigParser()
 
         self.client = None
         # if setup_client:
         #     self.setup_client()
+
+        self.max_retries = 3
 
     def setup_client(self, auth_setup=False):
         self.get_local_configuration()
@@ -114,12 +120,15 @@ class ClientManager:
         name_envs = {'host': 'IDDS_HOST',
                      'local_config_root': 'IDDS_LOCAL_CONFIG_ROOT',
                      'config': 'IDDS_CONFIG',
+                     'max_request_length': 'IDDS_MAX_REQUEST_LENGTH',
+                     'request_cache': 'IDDS_REQUEST_CACHE',
                      'auth_type': 'IDDS_AUTH_TYPE',
                      'oidc_token_file': 'IDDS_OIDC_TOKEN_FILE',
                      'oidc_token': 'IDDS_OIDC_TOKEN',
                      'vo': 'IDDS_VO',
                      'auth_no_verify': 'IDDS_AUTH_NO_VERIFY',
-                     'enable_json_outputs': 'IDDS_ENABLE_JSON_OUTPUTS'}
+                     'enable_json_outputs': 'IDDS_ENABLE_JSON_OUTPUTS',
+                     'max_retries': 'IDDS_CLIENT_MAX_RETRIES'}
 
         additional_name_envs = {'oidc_token': 'OIDC_AUTH_ID_TOKEN',
                                 'oidc_token_file': 'OIDC_AUTH_TOKEN_FILE',
@@ -147,6 +156,9 @@ class ClientManager:
     def get_section(self, name):
         name_sections = {'config': 'common',
                          'auth_type': 'common',
+                         'max_request_length': 'common',      # 1000000
+                         'request_cache': 'common',
+                         'max_retries': 'common',
                          'host': 'rest',
                          'x509_proxy': 'x509_proxy',
                          'oidc_token_file': 'oidc',
@@ -183,7 +195,7 @@ class ClientManager:
 
         self.x509_proxy = self.get_config_value(config, None, 'x509_proxy', current=self.x509_proxy,
                                                 default='/tmp/x509up_u%d' % os.geteuid())
-        if not self.x509_proxy or not os.path.exists(self.x509_proxy):
+        if 'X509_USER_PROXY' in os.environ or not self.x509_proxy or not os.path.exists(self.x509_proxy):
             proxy = get_proxy_path()
             if proxy:
                 self.x509_proxy = proxy
@@ -204,6 +216,14 @@ class ClientManager:
         self.enable_json_outputs = self.get_config_value(config, None, 'enable_json_outputs',
                                                          current=self.enable_json_outputs, default=None)
         self.configuration = config
+
+        self.max_request_length = self.get_config_value(config, None, 'max_request_length',
+                                                        current=self.max_request_length, default=None)
+        self.request_cache = self.get_config_value(config, None, 'request_cache',
+                                                   current=self.request_cache, default=None)
+
+        self.max_retries = self.get_config_value(config, None, 'max_retries',
+                                                 current=self.max_retries, default=None)
 
     def set_local_configuration(self, name, value):
         if value:
@@ -422,6 +442,20 @@ class ClientManager:
         # logging.info("Ping idds server: %s" % str(status))
         return status
 
+    def submit_big_workflow(self, workflow, username=None, userdn=None, use_dataset_name=False):
+        if workflow.is_with_steps() or workflow.is_workflow_step:
+            return workflow
+
+        wf_steps = workflow.split_workflow_to_steps(request_cache=self.request_cache, max_request_length=self.max_request_length)
+        for wf_step in wf_steps:
+            ret = self.submit(wf_step, username=username, userdn=userdn, use_dataset_name=use_dataset_name)
+            if ret is not None and ret == 0:
+                logging.info(f"Successfully upload workflow step: {wf_step.step_name}")
+            else:
+                msg = f"Failed to submit workflow step {wf_step.step_name}: {ret}"
+                raise Exception(msg)
+        return workflow
+
     @exception_handler
     def submit(self, workflow, username=None, userdn=None, use_dataset_name=False):
         """
@@ -431,16 +465,47 @@ class ClientManager:
         """
         self.setup_client()
 
+        scope = 'workflow'
+        request_type = RequestType.Workflow
+        transform_tag = 'workflow'
+        priority = 0
+        try:
+            if workflow.workflow_type in [WorkflowType.iWorkflow]:
+                scope = 'iworkflow'
+                request_type = RequestType.iWorkflow
+                transform_tag = workflow.get_work_tag()
+                priority = workflow.priority
+                if priority is None:
+                    priority = 0
+            elif workflow.workflow_type in [WorkflowType.iWorkflowLocal]:
+                scope = 'iworkflowLocal'
+                request_type = RequestType.iWorkflowLocal
+                transform_tag = workflow.get_work_tag()
+                priority = workflow.priority
+                if priority is None:
+                    priority = 0
+        except Exception:
+            pass
+
+        if hasattr(self, 'submit_big_workflow'):
+            workflow = self.submit_big_workflow(workflow, username=username, userdn=userdn, use_dataset_name=use_dataset_name)
+
         props = {
-            'scope': 'workflow',
+            'campaign': workflow.campaign,
+            'campaign_scope': workflow.campaign_scope,
+            'campaign_group': workflow.campaign_group,
+            'campaign_tag': workflow.campaign_tag,
+            'max_processing_requests': workflow.max_processing_requests,
+            'scope': scope,
             'name': workflow.name,
             'requester': 'panda',
-            'request_type': RequestType.Workflow,
+            'request_type': request_type,
             'username': username if username else workflow.username,
             'userdn': userdn if userdn else workflow.userdn,
-            'transform_tag': 'workflow',
+            'transform_tag': transform_tag,
             'status': RequestStatus.New,
-            'priority': 0,
+            'priority': priority,
+            'site': workflow.get_site(),
             'lifetime': workflow.lifetime,
             'workload_id': workflow.get_workload_id(),
             'request_metadata': {'version': release_version, 'workload_id': workflow.get_workload_id(), 'workflow': workflow}
@@ -452,7 +517,8 @@ class ClientManager:
             props['userdn'] = self.client.original_user_dn
 
         if self.auth_type == 'x509_proxy':
-            workflow.add_proxy()
+            if hasattr(workflow, 'add_proxy'):
+                workflow.add_proxy()
 
         if use_dataset_name or not workflow.name:
             primary_init_work = workflow.get_primary_initial_collection()
@@ -469,6 +535,58 @@ class ClientManager:
         return request_id
 
     @exception_handler
+    def submit_work(self, request_id, work, use_dataset_name=False):
+        """
+        Submit the workflow as a request to iDDS server.
+
+        :param workflow: The workflow to be submitted.
+        """
+        self.setup_client()
+
+        transform_type = TransformType.Workflow
+        transform_tag = 'work'
+        priority = 0
+        workload_id = None
+        try:
+            if work.workflow_type in [WorkflowType.iWork]:
+                transform_type = TransformType.iWork
+                transform_tag = work.get_work_tag()
+                workload_id = work.workload_id
+                priority = work.priority
+                if priority is None:
+                    priority = 0
+            elif work.workflow_type in [WorkflowType.iWorkflow, WorkflowType.iWorkflowLocal]:
+                transform_type = TransformType.iWorkflow
+                transform_tag = work.get_work_tag()
+                workload_id = work.workload_id
+                priority = work.priority
+                if priority is None:
+                    priority = 0
+        except Exception:
+            pass
+
+        props = {
+            'workload_id': workload_id,
+            'transform_type': transform_type,
+            'transform_tag': transform_tag,
+            'priority': work.priority,
+            'retries': 0,
+            'internal_id': work.internal_id,
+            'parent_internal_id': work.get_parent_internal_id(),
+            'parent_transform_id': None,
+            'previous_transform_id': None,
+            # 'site': work.site,
+            'name': work.name,
+            'token': work.token,
+            'status': TransformStatus.New,
+            'transform_metadata': {'version': release_version, 'work': work}
+        }
+
+        # print(props)
+        transform_id = self.client.add_transform(request_id, **props)
+        return transform_id
+
+    @exception_handler
     def submit_build(self, workflow, username=None, userdn=None, use_dataset_name=True):
         """
         Submit the workflow as a request to iDDS server.
@@ -478,6 +596,10 @@ class ClientManager:
         self.setup_client()
 
         props = {
+            'campaign': workflow.campaign,
+            'campaign_scope': workflow.campaign_scope,
+            'campaign_group': workflow.campaign_group,
+            'campaign_tag': workflow.campaign_tag,
             'scope': 'workflow',
             'name': workflow.name,
             'requester': 'panda',
@@ -551,6 +673,24 @@ class ClientManager:
             return (-1, "The task_id is required for killing tasks")
 
         ret = self.client.abort_request_task(request_id=request_id, workload_id=workload_id, task_id=task_id)
+        return ret
+
+    @exception_handler
+    def close(self, request_id=None, workload_id=None):
+        """
+        Close requests.
+
+        :param workload_id: the workload id.
+        :param request_id: the request.
+        """
+        self.setup_client()
+
+        if request_id is None and workload_id is None:
+            logging.error("Both request_id and workload_id are None. One of them should not be None")
+            return (-1, "Both request_id and workload_id are None. One of them should not be None")
+
+        ret = self.client.close_request(request_id=request_id, workload_id=workload_id)
+        # return (-1, 'No matching requests')
         return ret
 
     @exception_handler
@@ -628,6 +768,32 @@ class ClientManager:
             return str(ret)
 
     @exception_handler
+    def get_transforms(self, request_id=None, workload_id=None):
+        """
+        Get transforms.
+
+        :param workload_id: the workload id.
+        :param request_id: the request.
+        """
+        self.setup_client()
+
+        tfs = self.client.get_transforms(request_id=request_id, workload_id=workload_id)
+        return tfs
+
+    @exception_handler
+    def get_transform(self, request_id=None, transform_id=None):
+        """
+        Get transforms.
+
+        :param transform_id: the transform id.
+        :param request_id: the request.
+        """
+        self.setup_client()
+
+        tf = self.client.get_transform(request_id=request_id, transform_id=transform_id)
+        return tf
+
+    @exception_handler
     def download_logs(self, request_id=None, workload_id=None, dest_dir='./', filename=None):
         """
         Download logs for a request.
@@ -642,10 +808,10 @@ class ClientManager:
         filename = self.client.download_logs(request_id=request_id, workload_id=workload_id, dest_dir=dest_dir, filename=filename)
         if filename:
             logging.info("Logs are downloaded to %s" % filename)
-            return (0, "Logs are downloaded to %s" % filename)
+            return (True, "Logs are downloaded to %s" % filename)
         else:
             logging.info("Failed to download logs for workload_id(%s) and request_id(%s)" % (workload_id, request_id))
-            return (-1, "Failed to download logs for workload_id(%s) and request_id(%s)" % (workload_id, request_id))
+            return (False, "Failed to download logs for workload_id(%s) and request_id(%s)" % (workload_id, request_id))
 
     @exception_handler
     def upload_to_cacher(self, filename):
@@ -698,7 +864,26 @@ class ClientManager:
         return self.client.update_hyperparameter(workload_id=workload_id, request_id=request_id, id=id, loss=loss)
 
     @exception_handler
-    def get_messages(self, request_id=None, workload_id=None):
+    def send_messages(self, request_id=None, workload_id=None, transform_id=None, internal_id=None, msgs=None):
+        """
+        Send messages.
+
+        :param workload_id: the workload id.
+        :param request_id: the request.
+        """
+        self.setup_client()
+
+        if request_id is None and workload_id is None:
+            logging.error("Both request_id and workload_id are None. One of them should not be None")
+            return (-1, "Both request_id and workload_id are None. One of them should not be None")
+
+        logging.info("Retrieving messages for request_id: %s, workload_id: %s" % (request_id, workload_id))
+        self.client.send_messages(request_id=request_id, workload_id=workload_id, transform_id=transform_id, internal_id=internal_id, msgs=msgs)
+        logging.info("Sent %s messages for request_id: %s, workload_id: %s" % (len(msgs), request_id, workload_id))
+        return True, None
+
+    @exception_handler
+    def get_messages(self, request_id=None, workload_id=None, transform_id=None, internal_id=None):
         """
         Get messages.
 
@@ -712,9 +897,49 @@ class ClientManager:
             return (-1, "Both request_id and workload_id are None. One of them should not be None")
 
         logging.info("Retrieving messages for request_id: %s, workload_id: %s" % (request_id, workload_id))
-        msgs = self.client.get_messages(request_id=request_id, workload_id=workload_id)
+        msgs = self.client.get_messages(request_id=request_id, workload_id=workload_id, transform_id=transform_id, internal_id=internal_id)
         logging.info("Retrieved %s messages for request_id: %s, workload_id: %s" % (len(msgs), request_id, workload_id))
-        return (0, msgs)
+        return (True, msgs)
+
+    @exception_handler
+    def get_collections(self, request_id=None, transform_id=None, workload_id=None, scope=None, name=None, relation_type=None):
+        """
+        Get collections from the Head service.
+
+        :param request_id: the request id.
+        :param transform_id: the transform id.
+        :param workload_id: the workload id.
+        :param scope: the scope.
+        :param name: the name.
+        :param relation_type: the relation type (input, output and log).
+
+        :raise exceptions if it's not got successfully.
+        """
+        self.setup_client()
+
+        colls = self.client.get_collections(request_id=request_id, transform_id=transform_id, workload_id=workload_id,
+                                            scope=scope, name=name, relation_type=relation_type)
+        return colls
+
+    def get_contents(self, request_id=None, transform_id=None, workload_id=None, coll_scope=None, coll_name=None, relation_type=None, status=None):
+        """
+        Get contents from the Head service.
+
+        :param request_id: the request id.
+        :param transform_id: the transform id.
+        :param workload_id: the workload id.
+        :param coll_scope: the scope of the related collection.
+        :param coll_name: the name of the related collection.
+        :param relation_type: the relation type (input, output and log).
+        :param status: the status of related contents.
+
+        :raise exceptions if it's not got successfully.
+        """
+        self.setup_client()
+
+        contents = self.client.get_contents(request_id=request_id, transform_id=transform_id, workload_id=workload_id,
+                                            coll_scope=coll_scope, coll_name=coll_name, relation_type=relation_type, status=status)
+        return contents
 
     @exception_handler
     def get_contents_output_ext(self, request_id=None, workload_id=None, transform_id=None, group_by_jedi_task_id=False):
@@ -729,8 +954,9 @@ class ClientManager:
         """
         self.setup_client()
 
-        return self.client.get_contents_output_ext(workload_id=workload_id, request_id=request_id, transform_id=transform_id,
-                                                   group_by_jedi_task_id=group_by_jedi_task_id)
+        contents = self.client.get_contents_output_ext(workload_id=workload_id, request_id=request_id, transform_id=transform_id,
+                                                       group_by_jedi_task_id=group_by_jedi_task_id)
+        return contents
 
     @exception_handler
     def update_build_request(self, request_id, signature, workflow):
@@ -745,4 +971,19 @@ class ClientManager:
         """
         self.setup_client()
 
-        return self.client.update_build_request(request_id=request_id, signature=signature, workflow=workflow)
+        ret = self.client.update_build_request(request_id=request_id, signature=signature, workflow=workflow)
+        return ret
+
+    @exception_handler
+    def get_metainfo(self, name):
+        """
+        Get meta info.
+
+        :param name: the name of the meta info.
+        """
+        self.setup_client()
+
+        logging.info("Retrieving meta info for %s" % (name))
+        ret = self.client.get_metainfo(name=name)
+        logging.info("Retrieved meta info for %s: %s" % (name, idds_mask(ret)))
+        return True, ret

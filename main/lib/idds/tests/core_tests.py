@@ -174,8 +174,10 @@ def print_workflow_template(workflow, layers=0):
 # reqs = get_requests(request_id=385554, with_request=True, with_detail=False, with_metadata=True)
 reqs = get_requests(request_id=479187, with_request=True, with_detail=False, with_metadata=True)
 reqs = get_requests(request_id=4498, with_request=True, with_detail=False, with_metadata=True)
-reqs = get_requests(request_id=4615, with_request=True, with_detail=False, with_metadata=True)
-reqs = get_requests(request_id=535793, with_request=True, with_detail=False, with_metadata=True)
+reqs = get_requests(request_id=3244, with_request=True, with_detail=False, with_metadata=True)
+reqs = get_requests(request_id=6082, with_request=True, with_detail=False, with_metadata=True)
+# reqs = get_requests(request_id=589913, with_request=True, with_detail=False, with_metadata=True)
+reqs = get_requests(request_id=13798, with_request=True, with_detail=False, with_metadata=True)
 for req in reqs:
     # print(req['request_id'])
     # print(req)
@@ -227,9 +229,9 @@ for req in reqs:
     print(json_dumps(workflow.template, sort_keys=True, indent=4))
 
 
-"""
 sys.exit(0)
 
+"""
 reqs = get_requests(request_id=28182323, with_request=False, with_detail=True, with_metadata=False)
 for req in reqs:
     print(json_dumps(req, sort_keys=True, indent=4))

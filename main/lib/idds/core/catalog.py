@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2025
 
 
 """
@@ -261,7 +261,7 @@ def update_input_collection_with_contents(coll, parameters, contents, bulk_size=
 
 
 @transactional_session
-def update_contents(parameters, session=None):
+def update_contents(parameters, request_id=None, transform_id=None, use_bulk_update_mappings=True, session=None):
     """
     updatecontents.
 
@@ -272,7 +272,8 @@ def update_contents(parameters, session=None):
     :raises DatabaseException: If there is a database error.
 
     """
-    return orm_contents.update_contents(parameters, session=session)
+    return orm_contents.update_contents(parameters, request_id=request_id, transform_id=transform_id,
+                                        use_bulk_update_mappings=use_bulk_update_mappings, session=session)
 
 
 @transactional_session
@@ -292,8 +293,8 @@ def update_content(content_id, parameters, session=None):
 
 
 @read_session
-def get_contents(coll_scope=None, coll_name=None, request_id=None, workload_id=None, transform_id=None,
-                 relation_type=None, status=None, to_json=False, session=None):
+def get_contents(coll_scope=None, coll_name=None, coll_id=[], request_id=None, workload_id=None, transform_id=None,
+                 relation_type=None, content_relation_type=None, status=None, to_json=False, session=None):
     """
     Get contents with collection scope, collection name, request id, workload id and relation type.
 
@@ -308,23 +309,28 @@ def get_contents(coll_scope=None, coll_name=None, request_id=None, workload_id=N
 
     :returns: list of contents
     """
-    collections = get_collections(scope=coll_scope, name=coll_name, request_id=request_id,
-                                  workload_id=workload_id, transform_id=transform_id,
-                                  relation_type=relation_type, to_json=to_json, session=session)
+    if not coll_id:
+        collections = get_collections(scope=coll_scope, name=coll_name, request_id=request_id,
+                                      workload_id=workload_id, transform_id=transform_id,
+                                      relation_type=relation_type, to_json=to_json, session=session)
 
-    coll_ids = [coll['coll_id'] for coll in collections]
+        coll_ids = [coll['coll_id'] for coll in collections]
+    else:
+        coll_ids = coll_id
+
     if coll_ids:
-        if relation_type is None:
-            content_relation_type = None
-        else:
-            if relation_type == CollectionRelationType.Output:
-                content_relation_type = ContentRelationType.Output
-            elif relation_type == CollectionRelationType.Input:
-                content_relation_type = ContentRelationType.Input
-            elif relation_type == CollectionRelationType.Log:
-                content_relation_type = ContentRelationType.Log
-        rets = orm_contents.get_contents(coll_id=coll_ids, status=status, to_json=to_json,
-                                         relation_type=content_relation_type, session=session)
+        if content_relation_type is None:
+            if relation_type is None:
+                content_relation_type = None
+            else:
+                if relation_type == CollectionRelationType.Output:
+                    content_relation_type = ContentRelationType.Output
+                elif relation_type == CollectionRelationType.Input:
+                    content_relation_type = ContentRelationType.Input
+                elif relation_type == CollectionRelationType.Log:
+                    content_relation_type = ContentRelationType.Log
+        rets = orm_contents.get_contents(request_id=request_id, transform_id=transform_id, coll_id=coll_ids, status=status,
+                                         to_json=to_json, relation_type=content_relation_type, session=session)
     else:
         rets = []
     return rets
@@ -682,6 +688,34 @@ def update_contents_from_others_by_dep_id(request_id=None, transform_id=None, se
     return orm_contents.update_contents_from_others_by_dep_id(request_id=request_id, transform_id=transform_id, session=session)
 
 
+@transactional_session
+def update_contents_from_others_by_dep_id_pages(request_id=None, transform_id=None, page_size=2000, status_not_to_check=None,
+                                                logger=None, log_prefix=None, session=None):
+    """
+    Update contents from others by content_dep_id
+
+    :param request_id: The Request id.
+    :param transfomr_id: The transform id.
+    """
+    return orm_contents.update_contents_from_others_by_dep_id_pages(request_id=request_id, transform_id=transform_id, page_size=page_size,
+                                                                    logger=logger, log_prefix=log_prefix, status_not_to_check=status_not_to_check,
+                                                                    session=session)
+
+
+@transactional_session
+def update_input_contents_by_dependency_pages(request_id=None, transform_id=None, page_size=2000, batch_size=2000, logger=None, log_prefix=None,
+                                              terminated=False, status_not_to_check=None, session=None):
+    """
+    Update input contents by dependencies
+
+    :param request_id: The Request id.
+    :param transfomr_id: The transform id.
+    """
+    return orm_contents.update_input_contents_by_dependency_pages(request_id=request_id, transform_id=transform_id, page_size=page_size,
+                                                                  batch_size=batch_size, terminated=terminated, logger=logger, log_prefix=log_prefix,
+                                                                  status_not_to_check=status_not_to_check, session=session)
+
+
 @read_session
 def get_update_contents_from_others_by_dep_id(request_id=None, transform_id=None, session=None):
     """
@@ -763,7 +797,7 @@ def add_contents_ext(contents, bulk_size=10000, session=None):
 
 
 @transactional_session
-def update_contents_ext(parameters, session=None):
+def update_contents_ext(parameters, request_id=None, transform_id=None, use_bulk_update_mappings=True, session=None):
     """
     update contents ext.
 
@@ -774,7 +808,8 @@ def update_contents_ext(parameters, session=None):
     :raises DatabaseException: If there is a database error.
 
     """
-    return orm_contents.update_contents_ext(parameters, session=session)
+    return orm_contents.update_contents_ext(parameters, request_id=request_id, transform_id=transform_id,
+                                            use_bulk_update_mappings=use_bulk_update_mappings, session=session)
 
 
 @read_session

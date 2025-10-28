@@ -1201,6 +1201,17 @@ class WorkflowBase(Base):
     def get_workload_id(self):
         return self.workload_id
 
+    def get_site(self):
+        try:
+            work_id = self.primary_initial_work
+            if not work_id:
+                work_id = list(self.works.keys())[0]
+            work = self.works[work_id]
+            return work.get_site()
+        except Exception:
+            pass
+        return None
+
     def add_initial_works(self, work):
         self.initial_works.append(work.get_internal_id())
         if self.primary_initial_work is None:
@@ -1814,6 +1825,12 @@ class WorkflowBase(Base):
         """
         return self.is_terminated() and (self.num_finished_works + self.num_subfinished_works > 0 and self.num_finished_works + self.num_subfinished_works <= self.num_total_works)
 
+    def is_processed(self, synchronize=True):
+        """
+        *** Function called by Transformer agent.
+        """
+        return self.is_terminated(synchronize=synchronize) and (self.num_finished_works + self.num_subfinished_works > 0 and self.num_finished_works + self.num_subfinished_works <= self.num_total_works)
+
     def is_failed(self, synchronize=True):
         """
         *** Function called by Marshaller agent.
@@ -2110,6 +2127,9 @@ class Workflow(Base):
             return self.runs[str(self.num_run)].workload_id
         return self.template.workload_id
 
+    def get_site(self):
+        return self.template.get_site()
+
     def add_work(self, work, initial=False, primary=False):
         self.template.add_work(work, initial, primary)
 
@@ -2202,6 +2222,11 @@ class Workflow(Base):
     def is_subfinished(self, synchronize=True):
         if self.is_terminated():
             return self.runs[str(self.num_run)].is_subfinished()
+        return False
+
+    def is_processed(self, synchronize=True):
+        if self.is_terminated():
+            return self.runs[str(self.num_run)].is_processed()
         return False
 
     def is_failed(self, synchronize=True):

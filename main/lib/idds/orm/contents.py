@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2025
 
 
 """
@@ -15,16 +15,25 @@ operations related to Requests.
 
 import datetime
 import hashlib
+import time
+import traceback
+
+from enum import Enum
+from collections import defaultdict
 
 import sqlalchemy
 from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy.exc import DatabaseError, IntegrityError
+# from sqlalchemy.orm import aliased
+from sqlalchemy.sql import exists, select, expression, update
 from sqlalchemy.sql.expression import asc
 
 from idds.common import exceptions
 from idds.common.constants import (ContentType, ContentStatus, ContentLocking,
                                    ContentFetchStatus, ContentRelationType)
+from idds.common.utils import group_list
+from idds.common.utils import json_dumps
 from idds.orm.base.session import read_session, transactional_session
 from idds.orm.base import models
 
@@ -162,7 +171,8 @@ def add_contents(contents, bulk_size=10000, session=None):
 
     try:
         for sub_param in sub_params:
-            session.bulk_insert_mappings(models.Content, sub_param)
+            # session.bulk_insert_mappings(models.Content, sub_param)
+            custom_bulk_insert_mappings(models.Content, sub_param, session=session)
         content_ids = [None for _ in range(len(contents))]
         return content_ids
     except IntegrityError as error:
@@ -278,7 +288,7 @@ def get_match_contents(coll_id, scope, name, content_type=None, min_id=None, max
 
 
 @read_session
-def get_contents(scope=None, name=None, transform_id=None, coll_id=None, status=None,
+def get_contents(scope=None, name=None, request_id=None, transform_id=None, workload_id=None, coll_id=None, status=None,
                  relation_type=None, to_json=False, session=None):
     """
     Get content or raise a NoObject exception.
@@ -309,8 +319,12 @@ def get_contents(scope=None, name=None, transform_id=None, coll_id=None, status=
 
         query = session.query(models.Content)
 
+        if request_id:
+            query = query.filter(models.Content.request_id == request_id)
         if transform_id:
             query = query.filter(models.Content.transform_id == transform_id)
+        if workload_id:
+            query = query.filter(models.Content.workload_id == workload_id)
         if coll_id:
             query = query.filter(models.Content.coll_id.in_(coll_id))
         if scope:
@@ -341,7 +355,7 @@ def get_contents(scope=None, name=None, transform_id=None, coll_id=None, status=
 
 
 @read_session
-def get_contents_by_request_transform(request_id=None, transform_id=None, workload_id=None, status=None, map_id=None, status_updated=False, session=None):
+def get_contents_by_request_transform(request_id=None, transform_id=None, workload_id=None, status=None, map_id=None, status_updated=False, with_deps=True, session=None):
     """
     Get content or raise a NoObject exception.
 
@@ -374,6 +388,9 @@ def get_contents_by_request_transform(request_id=None, transform_id=None, worklo
             query = query.filter(models.Content.map_id == map_id)
         if status_updated:
             query = query.filter(models.Content.status != models.Content.substatus)
+        if not with_deps:
+            query = query.filter(models.Content.content_relation_type != 3)
+
         query = query.order_by(asc(models.Content.request_id), asc(models.Content.transform_id), asc(models.Content.map_id))
 
         tmp = query.all()
@@ -472,7 +489,172 @@ def update_content(content_id, parameters, session=None):
 
 
 @transactional_session
-def update_contents(parameters, session=None):
+def custom_bulk_insert_mappings_real(model, parameters, session=None):
+    """
+    insert contents in bulk
+    """
+    if not parameters:
+        return
+
+    try:
+        schema_prefix = f"{model.metadata.schema}." if model.metadata.schema else ""
+        sequence_name = f'"{model.metadata.schema}"."CONTENT_ID_SEQ"' if model.metadata.schema else '"CONTENT_ID_SEQ"'
+        table_name = f"{schema_prefix}{model.__tablename__}"
+
+        def get_row_value(row, column):
+            """Process row values to ensure correct formatting for SQL"""
+            val = row.get(column.name, None)
+            if val is None:
+                if column.name in ['map_id', 'fetch_status', 'sub_map_id', 'dep_sub_map_id', 'content_relation_type']:
+                    val = 0
+                elif column.name in ['created_at', 'updated_at', 'accessed_at']:
+                    val = datetime.datetime.utcnow().isoformat()
+                elif column.default is not None and not column.primary_key:
+                    default_val = column.default.arg
+                    if callable(default_val):
+                        try:
+                            return default_val()
+                        except TypeError:
+                            return None
+                    elif isinstance(default_val, expression.ClauseElement):
+                        return None
+                    return default_val
+                return val
+            elif isinstance(val, Enum):
+                return val.value
+            elif isinstance(val, datetime.datetime):
+                return val.isoformat()
+            elif isinstance(val, dict):
+                return json_dumps(val)
+            return val
+
+        if model.__tablename__.lower() in ['contents']:
+            exclude_columns = ['content_id']
+        else:
+            exclude_columns = []
+
+        columns = [column for column in model.__mapper__.columns if column.name not in exclude_columns]
+
+        column_key_sql = ", ".join([column.name for column in columns])
+        column_value_sql = ", ".join([f":{column.name}" for column in columns])
+
+        # Convert Enum fields to their values
+        updated_parameters = [
+            {column.name: get_row_value(row, column) for column in columns} for row in parameters
+        ]
+
+        if model.__tablename__.lower() == 'contents':
+            sql = f"""
+               INSERT INTO {table_name} (content_id, {column_key_sql})
+               VALUES (nextval('{sequence_name}'), {column_value_sql})
+               ON CONFLICT DO NOTHING
+            """
+        else:
+            sql = f"""
+               INSERT INTO {table_name} ({column_key_sql})
+               VALUES ({column_value_sql})
+               ON CONFLICT DO NOTHING
+            """
+
+        stmt = sqlalchemy.text(sql)
+        session.execute(stmt, updated_parameters)
+        # session.commit()
+    except Exception as ex:
+        print(f"custom_bulk_insert_mappings Exception: {ex}")
+        print(traceback.format_exc())
+        raise ex
+
+
+@transactional_session
+def custom_bulk_insert_mappings(model, parameters, batch_size=1000, session=None):
+    """
+    insert contents in bulk
+    """
+    if not parameters:
+        return
+
+    dialect = session.bind.dialect.name
+
+    for i in range(0, len(parameters), batch_size):
+        batch = parameters[i: i + batch_size]
+        if dialect == 'postgresql':
+            custom_bulk_insert_mappings_real(model=model, parameters=batch, session=session)
+        else:
+            session.bulk_insert_mappings(model, batch)
+            # session.flush()
+
+    # session.commit()
+
+
+@transactional_session
+def custom_bulk_update_mappings_real(model, parameters, batch_size=1000, session=None):
+    """
+    update contents in bulk
+    """
+    if not parameters:
+        return
+
+    select_keys = ['content_id', 'request_id', 'transform_id']
+
+    first_row = parameters[0]
+    select_key_sql = [f"{key} = :{key}" for key in first_row if key in select_keys]
+    update_key_sql = [f"{key} = :{key}" for key in first_row if key not in select_keys]
+
+    if not update_key_sql or not select_key_sql or 'content_id' not in first_row.keys():
+        raise ValueError("No updatable columns found.")
+
+    for i in range(0, len(parameters), batch_size):
+        batch = parameters[i: i + batch_size]
+
+        # Convert Enum fields to their values
+        updated_parameters = []
+        for row in batch:
+            updated_row = {
+                key: (
+                    value.value if isinstance(value, Enum)
+                    else value.isoformat() if isinstance(value, datetime.datetime)
+                    else json_dumps(value) if isinstance(value, dict)
+                    else value
+                )
+                for key, value in row.items()
+            }
+            updated_parameters.append(updated_row)
+
+        # Construct SQL dynamically
+        schema_prefix = f"{model.metadata.schema}." if model.metadata.schema else ""
+        sql = f"""
+            UPDATE {schema_prefix}{model.__tablename__}
+            SET {", ".join(update_key_sql)}
+            WHERE {" AND ".join(select_key_sql)}
+        """
+
+        stmt = sqlalchemy.text(sql)
+        session.execute(stmt, updated_parameters)
+        # session.flush()
+
+    # session.commit()
+
+
+@transactional_session
+def custom_bulk_update_mappings(model, parameters, batch_size=1000, session=None):
+    """
+    update contents in bulk
+    """
+    if not parameters:
+        return
+
+    column_key_groups = {}
+    for row in parameters:
+        keys = sorted(row.keys())  # consistent key ordering
+        keys_id = ','.join(keys)
+        column_key_groups.setdefault(keys_id, []).append(row)
+
+    for keys_id, rows in column_key_groups.items():
+        custom_bulk_update_mappings_real(model, rows, batch_size=batch_size, session=session)
+
+
+@transactional_session
+def update_contents(parameters, use_bulk_update_mappings=True, request_id=None, transform_id=None, session=None):
     """
     update contents.
 
@@ -484,10 +666,26 @@ def update_contents(parameters, session=None):
 
     """
     try:
-        for parameter in parameters:
-            parameter['updated_at'] = datetime.datetime.utcnow()
+        if use_bulk_update_mappings:
+            for parameter in parameters:
+                parameter['updated_at'] = datetime.datetime.utcnow()
 
-        session.bulk_update_mappings(models.Content, parameters)
+            # session.bulk_update_mappings(models.Content, parameters)
+            custom_bulk_update_mappings(models.Content, parameters, session=session)
+        else:
+            groups = group_list(parameters, key='content_id')
+            for group_key in groups:
+                group = groups[group_key]
+                keys = group['keys']
+                items = group['items']
+                items['updated_at'] = datetime.datetime.utcnow()
+                query = session.query(models.Content)
+                if request_id:
+                    query = query.filter(models.Content.request_id == request_id)
+                if transform_id:
+                    query = query.filter(models.Content.transform_id == transform_id)
+                query = query.filter(models.Content.content_id.in_(keys))\
+                             .update(items, synchronize_session=False)
     except sqlalchemy.orm.exc.NoResultFound as error:
         raise exceptions.NoObject('Content cannot be found: %s' % (error))
 
@@ -564,6 +762,422 @@ def update_contents_from_others_by_dep_id(request_id=None, transform_id=None, se
         raise ex
 
 
+@transactional_session
+def update_contents_from_others_by_dep_id_pages_old(request_id=None, transform_id=None, page_size=1000, batch_size=500,
+                                                    status_not_to_check=None, logger=None, log_prefix=None, session=None):
+    """
+    Update contents from others by content_dep_id, with pages
+
+    :param request_id: The Request id.
+    :param transfomr_id: The transform id.
+    """
+    try:
+        if log_prefix is None:
+            log_prefix = ""
+
+        # Define alias for Content model to avoid conflicts
+        # content_alias = aliased(models.Content)
+
+        # Create the main subquery (dependent contents)
+        main_subquery = session.query(
+            models.Content.content_id,
+            models.Content.substatus
+        )
+
+        if request_id:
+            main_subquery = main_subquery.filter(models.Content.request_id == request_id)
+
+        main_subquery = main_subquery.filter(
+            models.Content.content_relation_type == ContentRelationType.Output,
+            models.Content.substatus != ContentStatus.New
+        ).subquery()
+
+        # dep query
+        dep_subquery = session.query(
+            models.Content.content_id.label("content_id"),
+            models.Content.content_dep_id.label("content_dep_id"),
+            models.Content.substatus.label("substatus")
+        )
+
+        if request_id:
+            dep_subquery = dep_subquery.filter(models.Content.request_id == request_id)
+        if transform_id:
+            dep_subquery = dep_subquery.filter(models.Content.transform_id == transform_id)
+        if status_not_to_check:
+            dep_subquery = dep_subquery.filter(~models.Content.substatus.in_(status_not_to_check))
+
+        dep_subquery = dep_subquery.filter(models.Content.content_relation_type == ContentRelationType.InputDependency)
+
+        # Paginated Update Loop
+        last_id = None
+        while True:
+            paginated_query = dep_subquery.order_by(models.Content.content_id)
+            if last_id is not None:
+                paginated_query = paginated_query.filter(models.Content.content_id > last_id)
+            else:
+                # paginated_query = dep_subquery
+                # it makes paginated_query and dep_subquery the same object
+                # updates in paginated_query will also be in dep_subquery
+                pass
+
+            paginated_query = paginated_query.limit(page_size)
+            paginated_query = paginated_query.subquery()
+
+            paginated_query_deps_query = session.query(
+                paginated_query.c.content_id.label('dep_content_id'),
+                main_subquery.c.substatus,
+            ).join(
+                paginated_query,
+                and_(
+                    paginated_query.c.content_dep_id == main_subquery.c.content_id,
+                    paginated_query.c.substatus != main_subquery.c.substatus
+                )
+            )
+
+            # from sqlalchemy.dialects import postgresql
+            # query_deps_sql = paginated_query_deps_query.subquery().compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+            # if logger:
+            #     logger.debug(f"{log_prefix}query_update_sql: {query_deps_sql}")
+
+            results = paginated_query_deps_query.all()
+            if not results:
+                break
+
+            update_data = []
+            for row in results:
+                content_id = row[0]
+                substatus = row[1]
+                to_update = {"content_id": content_id, "substatus": substatus, "status": substatus}
+                update_data.append(to_update)
+                if last_id is None or content_id > last_id:
+                    last_id = content_id
+
+            for i in range(0, len(update_data), batch_size):
+                # session.bulk_update_mappings(models.Content, update_data[i:i + batch_size])
+                # session.commit()
+                custom_bulk_update_mappings(models.Content, update_data[i:i + batch_size], session=session)
+
+            if logger:
+                logger.debug(f"{log_prefix}update_contents_from_others_by_dep_id_pages: last_id: {last_id}")
+    except Exception as ex:
+        raise ex
+
+
+@transactional_session
+def update_contents_from_others_by_dep_id_pages_with_coll_id(request_id, transform_id, coll_id, page_size=5000, batch_size=2000,
+                                                             status_not_to_check=None, logger=None, log_prefix=None, session=None):
+    """
+    Update contents from others by content_dep_id, with pages
+
+    :param request_id: The Request id.
+    :param transfomr_id: The transform id.
+    """
+    try:
+        if log_prefix is None:
+            log_prefix = ""
+
+        start = time.time()
+        # Subquery of dependent contents
+        main_subquery = (
+            session.query(
+                models.Content.content_id,
+                models.Content.substatus.label("substatus")
+            )
+            .filter(models.Content.request_id == request_id)
+            .filter(models.Content.coll_id == coll_id)
+            .filter(models.Content.content_relation_type == ContentRelationType.Output)
+            .filter(models.Content.substatus != ContentStatus.New)
+        )
+
+        main_subquery = main_subquery.subquery()
+
+        to_update = (
+            update(models.Content)
+            .values(status=main_subquery.c.substatus, substatus=main_subquery.c.substatus)
+            .where(models.Content.request_id == request_id)
+            .where(models.Content.transform_id == transform_id)
+            .where(models.Content.coll_id == coll_id)
+            .where(models.Content.content_relation_type == ContentRelationType.InputDependency)
+            .where(models.Content.content_dep_id == main_subquery.c.content_id)
+            .where(models.Content.substatus != main_subquery.c.substatus)
+        )
+
+        # Execute
+        result = session.execute(to_update)
+        session.commit()
+
+        end = time.time()
+        time_used = end - start
+        if logger:
+            logger.debug(f"Updated {result.rowcount} rows (with skip locked)")
+            logger.info(f"Update request_id {request_id} transform_id {transform_id} coll_id {coll_id} rows {result.rowcount} with {time_used} seconds")
+        return result.rowcount
+    except Exception as ex:
+        raise ex
+
+
+@transactional_session
+def update_contents_from_others_by_dep_id_pages(request_id=None, transform_id=None, page_size=5000, batch_size=5000, status_not_to_check=None,
+                                                logger=None, log_prefix=None, session=None):
+    """
+    Update contents from others by content_dep_id, with pages
+
+    :param request_id: The Request id.
+    :param transfomr_id: The transform id.
+    """
+    try:
+        if log_prefix is None:
+            log_prefix = ""
+
+        # get coll_id with unterminated contents
+        coll_query = session.query(
+            models.Content.request_id,
+            models.Content.transform_id,
+            models.Content.coll_id
+        )
+
+        if request_id:
+            coll_query = coll_query.filter(models.Content.request_id == request_id)
+        if transform_id:
+            coll_query = coll_query.filter(models.Content.transform_id == transform_id)
+        if status_not_to_check:
+            coll_query = coll_query.filter(~models.Content.substatus.in_(status_not_to_check))
+
+        coll_query = coll_query.filter(models.Content.content_relation_type == ContentRelationType.InputDependency)
+        coll_query = coll_query.group_by(models.Content.request_id, models.Content.transform_id, models.Content.coll_id)
+        coll_rows = coll_query.all()
+
+        coll_req_tf_coll = [(row.request_id, row.transform_id, row.coll_id) for row in coll_rows]
+        coll_ids = [row.coll_id for row in coll_rows]
+
+        # get depended tasks' coll_id with terminated contents
+        src_coll_query = session.query(
+            models.Content.coll_id
+        )
+        if request_id:
+            src_coll_query = src_coll_query.filter(models.Content.request_id == request_id)
+        src_coll_query = src_coll_query.filter(models.Content.coll_id.in_(coll_ids))
+        src_coll_query = src_coll_query.filter(models.Content.content_relation_type == ContentRelationType.Output)
+        if status_not_to_check:
+            src_coll_query = src_coll_query.filter(models.Content.substatus.in_(status_not_to_check))
+        src_coll_rows = src_coll_query.distinct()
+        src_coll_ids = [row.coll_id for row in src_coll_rows]
+
+        # coll_ids with terminated jobs in depended tasks and with unterminated jobs in current tasks
+        for req_id, tf_id, coll_id in coll_req_tf_coll:
+            if coll_id in src_coll_ids:
+                update_contents_from_others_by_dep_id_pages_with_coll_id(request_id=request_id,
+                                                                         transform_id=transform_id,
+                                                                         coll_id=coll_id,
+                                                                         page_size=page_size,
+                                                                         batch_size=batch_size,
+                                                                         status_not_to_check=status_not_to_check,
+                                                                         logger=logger,
+                                                                         log_prefix=log_prefix,
+                                                                         session=session)
+    except Exception as ex:
+        raise ex
+
+
+@transactional_session
+def update_input_contents_by_dependency_pages(request_id=None, transform_id=None, page_size=2000, batch_size=2000, logger=None,
+                                              log_prefix=None, terminated=False, status_not_to_check=None, session=None):
+    """
+    Update contents input contents by dependencies, with pages
+
+    :param request_id: The Request id.
+    :param transfomr_id: The transform id.
+    """
+    try:
+        if log_prefix is None:
+            log_prefix = ""
+
+        # Define alias for Content model to avoid conflicts
+        # content_alias = aliased(models.Content)
+
+        # Contents to be excluded by map_id and sub_map_id
+        query_ex = session.query(
+            models.Content.request_id.label("request_id"),
+            models.Content.transform_id.label("transform_id"),
+            models.Content.map_id.label("map_id"),
+            models.Content.sub_map_id.label("sub_map_id"),
+        )
+
+        if request_id:
+            query_ex = query_ex.filter(models.Content.request_id == request_id)
+        if transform_id:
+            query_ex = query_ex.filter(models.Content.transform_id == transform_id)
+
+        query_ex = query_ex.filter(
+            and_(
+                models.Content.content_relation_type == 3,
+                models.Content.substatus == ContentStatus.New        # dependencies not ready
+            )
+        ).distinct().subquery()
+
+        # query dependencies
+        query_deps = session.query(
+            models.Content.request_id.label("request_id"),
+            models.Content.transform_id.label("transform_id"),
+            models.Content.map_id.label("map_id"),
+            models.Content.sub_map_id.label("sub_map_id"),
+            models.Content.content_id.label("content_id"),
+            models.Content.substatus.label("substatus")
+        )
+
+        if request_id:
+            query_deps = query_deps.filter(models.Content.request_id == request_id)
+        if transform_id:
+            query_deps = query_deps.filter(models.Content.transform_id == transform_id)
+
+        query_deps = query_deps.filter(
+            models.Content.content_relation_type == 3
+        )
+
+        query_deps = query_deps.subquery()
+
+        # from sqlalchemy.dialects import postgresql
+        # query_deps_sql = query_deps.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        # if logger:
+        #     logger.debug(f"{log_prefix}query_deps_sql: {query_deps_sql}")
+
+        # Define the main query with the necessary filters
+        main_query = session.query(
+            models.Content.content_id,
+            models.Content.request_id,
+            models.Content.transform_id,
+            models.Content.map_id,
+            models.Content.sub_map_id
+        )
+
+        if request_id:
+            main_query = main_query.filter(models.Content.request_id == request_id)
+
+        if transform_id:
+            main_query = main_query.filter(models.Content.transform_id == transform_id)
+
+        if status_not_to_check:
+            main_query = main_query.filter(~(models.Content.substatus.in_(status_not_to_check)))
+
+        main_query = main_query.filter(models.Content.content_relation_type == 0)
+
+        main_query = main_query.filter(
+            ~exists(
+                select(
+                    models.Content.request_id,
+                    models.Content.transform_id,
+                    models.Content.map_id,
+                    models.Content.sub_map_id
+                ).where(
+                    models.Content.request_id == query_ex.c.request_id,
+                    models.Content.transform_id == query_ex.c.transform_id,
+                    models.Content.map_id == query_ex.c.map_id,
+                    models.Content.sub_map_id == query_ex.c.sub_map_id
+                )
+            )
+        )
+
+        # Aggregation function to determine final status
+        def custom_aggregation(key, values, terminated=False):
+            input_request_id, request_id, transform_id, map_id, sub_map_id, input_content_id = key
+            if request_id is None:
+                # left join, without right values
+                # no dependencies
+                logger.debug(f"{log_prefix}custom_aggregation, no dependencies")
+                return ContentStatus.Available
+
+            # available_status = [ContentStatus.Available, ContentStatus.FakeAvailable, ContentStatus.FinalSubAvailable]
+            available_status = [ContentStatus.Available, ContentStatus.FakeAvailable]
+            final_terminated_status = [ContentStatus.Available, ContentStatus.FakeAvailable,
+                                       ContentStatus.FinalFailed, ContentStatus.Missing,
+                                       ContentStatus.FinalSubAvailable]
+            terminated_status = [ContentStatus.Available, ContentStatus.FakeAvailable,
+                                 ContentStatus.Failed, ContentStatus.FinalFailed,
+                                 ContentStatus.Missing, ContentStatus.FinalSubAvailable]
+
+            if all(v in available_status for v in values):
+                return ContentStatus.Available
+            elif all(v in final_terminated_status for v in values):
+                return ContentStatus.Missing
+            elif terminated and all(v in terminated_status for v in values):
+                return ContentStatus.Missing
+            return ContentStatus.New
+
+        # Paginated Update Loop
+        last_id = None
+        while True:
+            # Fetch next batch using keyset pagination
+            paginated_query = main_query.order_by(models.Content.content_id)
+            if last_id:
+                paginated_query = paginated_query.filter(models.Content.content_id > last_id)
+
+            paginated_query = paginated_query.limit(page_size)
+            paginated_query = paginated_query.subquery()
+
+            paginated_query_deps_query = session.query(
+                paginated_query.c.content_id.label('input_content_id'),
+                paginated_query.c.request_id.label('input_request_id'),
+                query_deps.c.request_id,
+                query_deps.c.transform_id,
+                query_deps.c.map_id,
+                query_deps.c.sub_map_id,
+                query_deps.c.content_id,
+                query_deps.c.substatus,
+            ).outerjoin(
+                query_deps,
+                and_(
+                    paginated_query.c.request_id == query_deps.c.request_id,
+                    paginated_query.c.transform_id == query_deps.c.transform_id,
+                    paginated_query.c.map_id == query_deps.c.map_id,
+                    paginated_query.c.sub_map_id == query_deps.c.sub_map_id
+                )
+            ).order_by(
+                query_deps.c.request_id, query_deps.c.transform_id,
+                query_deps.c.map_id, query_deps.c.sub_map_id
+            )
+
+            paginated_query_deps = paginated_query_deps_query.all()
+
+            # from sqlalchemy.dialects import postgresql
+            # paginated_query_deps_query_sql = paginated_query_deps_query.subquery().compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+            # if logger:
+            #     logger.debug(f"{log_prefix}paginated_query_deps_query_sql: {paginated_query_deps_query_sql}")
+
+            if not paginated_query_deps:
+                break  # No more rows to process
+
+            # Aggregate results
+            grouped_data = defaultdict(list)
+            for row in paginated_query_deps:
+                input_content_id, input_request_id, request_id, transform_id, map_id, sub_map_id, content_id, status = row
+                grouped_data[(input_request_id, request_id, transform_id, map_id, sub_map_id, input_content_id)].append(status)
+
+                if last_id is None or input_content_id > last_id:
+                    last_id = input_content_id
+
+            aggregated_results = {key: custom_aggregation(key, values, terminated=terminated) for key, values in grouped_data.items()}
+
+            update_data = [
+                {
+                    "content_id": key[5],
+                    "request_id": key[0],
+                    "substatus": value
+                }
+                for key, value in aggregated_results.items()
+            ]
+
+            for i in range(0, len(update_data), batch_size):
+                # session.bulk_update_mappings(models.Content, update_data[i:i + batch_size])
+                # session.commit()
+                custom_bulk_update_mappings(models.Content, update_data[i:i + batch_size], session=session)
+                session.commit()
+
+            if logger:
+                logger.debug(f"{log_prefix}update_input_contents_by_dependency_pages: last_id {last_id}")
+    except Exception as ex:
+        raise ex
+
+
 @read_session
 def get_update_contents_from_others_by_dep_id(request_id=None, transform_id=None, session=None):
     """
@@ -581,8 +1195,10 @@ def get_update_contents_from_others_by_dep_id(request_id=None, transform_id=None
                            .filter(models.Content.substatus != ContentStatus.New)
         subquery = subquery.subquery()
 
-        query = session.query(models.Content.content_id,
-                              subquery.c.substatus)
+        columns = [models.Content.content_id, subquery.c.substatus]
+        column_names = [column.name for column in columns]
+
+        query = session.query(*columns)
         if request_id:
             query = query.filter(models.Content.request_id == request_id)
         if transform_id:
@@ -595,7 +1211,7 @@ def get_update_contents_from_others_by_dep_id(request_id=None, transform_id=None
         rets = []
         if tmp:
             for t in tmp:
-                t2 = dict(zip(t.keys(), t))
+                t2 = dict(zip(column_names, t))
                 rets.append(t2)
         return rets
     except Exception as ex:
@@ -622,10 +1238,12 @@ def get_updated_transforms_by_content_status(request_id=None, transform_id=None,
         subquery = subquery.filter(models.Content.content_relation_type == 1)
         subquery = subquery.subquery()
 
-        query = session.query(models.Content.request_id,
-                              models.Content.transform_id,
-                              models.Content.workload_id,
-                              models.Content.coll_id)
+        columns = [models.Content.request_id,
+                   models.Content.transform_id,
+                   models.Content.workload_id,
+                   models.Content.coll_id]
+        column_names = [column.name for column in columns]
+        query = session.query(*columns)
         # query = query.with_hint(models.Content, "INDEX(CONTENTS CONTENTS_REQ_TF_COLL_IDX)", 'oracle')
 
         if request_id:
@@ -641,7 +1259,7 @@ def get_updated_transforms_by_content_status(request_id=None, transform_id=None,
         rets = []
         if tmp:
             for t in tmp:
-                t2 = dict(zip(t.keys(), t))
+                t2 = dict(zip(column_names, t))
                 rets.append(t2)
         return rets
     except Exception as error:
@@ -688,7 +1306,7 @@ def get_contents_ext_maps():
                       'trans_exit_code': 'transExitCode', 'pilot_error_code': 'pilotErrorCode', 'pilot_error_diag': 'pilotErrorDiag',
                       'exe_error_code': 'exeErrorCode', 'exe_error_diag': 'exeErrorDiag', 'sup_error_code': 'supErrorCode',
                       'sup_error_diag': 'supErrorDiag', 'ddm_error_code': 'ddmErrorCode', 'ddm_error_diag': 'ddmErrorDiag',
-                      'brokerage_error_cdode': 'brokerageErrorCode', 'brokerage_error_diag': 'brokerageErrorDiag',
+                      'brokerage_error_code': 'brokerageErrorCode', 'brokerage_error_diag': 'brokerageErrorDiag',
                       'job_dispatcher_error_code': 'jobDispatcherErrorCode', 'job_dispatcher_error_diag': 'jobDispatcherErrorDiag',
                       'task_buffer_error_code': 'taskBufferErrorCode', 'task_buffer_error_diag': 'taskBufferErrorDiag',
                       'computing_site': 'computingSite', 'computing_element': 'computingElement',
@@ -721,7 +1339,8 @@ def add_contents_update(contents, bulk_size=10000, session=None):
 
     try:
         for sub_param in sub_params:
-            session.bulk_insert_mappings(models.Content_update, sub_param)
+            # session.bulk_insert_mappings(models.Content_update, sub_param)
+            custom_bulk_insert_mappings(models.Content_update, sub_param, session=session)
         content_ids = [None for _ in range(len(contents))]
         return content_ids
     except IntegrityError as error:
@@ -857,7 +1476,8 @@ def add_contents_ext(contents, bulk_size=10000, session=None):
 
     try:
         for sub_param in sub_params:
-            session.bulk_insert_mappings(models.Content_ext, sub_param)
+            # session.bulk_insert_mappings(models.Content_ext, sub_param)
+            custom_bulk_insert_mappings(models.Content_ext, sub_param, session=session)
         content_ids = [None for _ in range(len(contents))]
         return content_ids
     except IntegrityError as error:
@@ -867,7 +1487,7 @@ def add_contents_ext(contents, bulk_size=10000, session=None):
 
 
 @transactional_session
-def update_contents_ext(parameters, session=None):
+def update_contents_ext(parameters, use_bulk_update_mappings=True, request_id=None, transform_id=None, session=None):
     """
     update contents ext.
 
@@ -879,7 +1499,22 @@ def update_contents_ext(parameters, session=None):
 
     """
     try:
-        session.bulk_update_mappings(models.Content_ext, parameters)
+        if use_bulk_update_mappings:
+            # session.bulk_update_mappings(models.Content_ext, parameters)
+            custom_bulk_update_mappings(models.Content_ext, parameters, session=session)
+        else:
+            groups = group_list(parameters, key='content_id')
+            for group_key in groups:
+                group = groups[group_key]
+                keys = group['keys']
+                items = group['items']
+                query = session.query(models.Content_ext)
+                if request_id:
+                    query = query.filter(models.Content.request_id == request_id)
+                if transform_id:
+                    query = query.filter(models.Content.transform_id == transform_id)
+                query = query.filter(models.Content.content_id.in_(keys))\
+                             .update(items, synchronize_session=False)
     except sqlalchemy.orm.exc.NoResultFound as error:
         raise exceptions.NoObject('Content cannot be found: %s' % (error))
 
@@ -952,13 +1587,15 @@ def get_contents_ext_ids(request_id=None, transform_id=None, workload_id=None, c
             if not isinstance(status, (tuple, list)):
                 status = [status]
 
-        query = session.query(models.Content_ext.request_id,
-                              models.Content_ext.transform_id,
-                              models.Content_ext.workload_id,
-                              models.Content_ext.coll_id,
-                              models.Content_ext.content_id,
-                              models.Content_ext.panda_id,
-                              models.Content_ext.status)
+        columns = [models.Content_ext.request_id,
+                   models.Content_ext.transform_id,
+                   models.Content_ext.workload_id,
+                   models.Content_ext.coll_id,
+                   models.Content_ext.content_id,
+                   models.Content_ext.panda_id,
+                   models.Content_ext.status]
+        column_names = [column.name for column in columns]
+        query = session.query(*columns)
         if request_id:
             query = query.filter(models.Content_ext.request_id == request_id)
         if transform_id:
@@ -975,7 +1612,7 @@ def get_contents_ext_ids(request_id=None, transform_id=None, workload_id=None, c
         rets = []
         if tmp:
             for t in tmp:
-                t2 = dict(zip(t.keys(), t))
+                t2 = dict(zip(column_names, t))
                 rets.append(t2)
         return rets
     except sqlalchemy.orm.exc.NoResultFound as error:

@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2025
 
 
 from traceback import format_exc
@@ -28,7 +28,11 @@ from idds.core.messages import add_message
 from idds.core.commands import add_command
 from idds.rest.v1.controller import IDDSController
 
-from idds.rest.v1.utils import convert_old_req_2_workflow_req
+from idds.rest.v1.utils import (convert_old_req_2_workflow_req,
+                                get_workflow_item,
+                                get_additional_request_data_storage,
+                                convert_data_to_use_additional_storage,
+                                store_data_to_use_additional_storage)
 
 
 class Requests(IDDSController):
@@ -77,29 +81,68 @@ class Request(IDDSController):
             500 Internal Error
         """
         try:
+            logger = self.get_logger()
+
             parameters = self.get_request().data and json_loads(self.get_request().data)
+            logger.debug(f"parameters: {parameters}")
+
+            workflow = None
+            if ('request_metadata' in parameters and isinstance(parameters['request_metadata'], dict) and parameters['request_metadata'].get('workflow')):
+                workflow = parameters['request_metadata']['workflow']
+
+            with_add_storage, additional_data_storage = get_additional_request_data_storage(self.get_request().data, workflow, logger)
+            logger.info(f"additional_data_storage: {additional_data_storage}, with_add_storage: {with_add_storage}")
+
+            if workflow and workflow.is_workflow_step:
+                # upload work data
+                internal_id = workflow.get_internal_id()
+                zip_data = workflow.workflow_data
+                data = workflow.unzip_data(zip_data)
+
+                logger.info(f"Received data for works: {data.keys()}")
+                store_data_to_use_additional_storage(internal_id, data, additional_data_storage, logger)
+                return self.generate_http_response(HTTP_STATUS_CODE.OK, data={'request_id': 0})
+
             if 'status' not in parameters:
                 parameters['status'] = RequestStatus.New
             if 'priority' not in parameters:
                 parameters['priority'] = 0
+
+            if 'cloud' not in parameters or not parameters['cloud']:
+                parameters['cloud'] = get_workflow_item(parameters, 'get_cloud', logger)
+            if 'site' not in parameters or not parameters['site']:
+                parameters['site'] = get_workflow_item(parameters, 'get_site', logger)
+            if 'queue' not in parameters or not parameters['queue']:
+                parameters['queue'] = get_workflow_item(parameters, 'get_queue', logger)
+
             # if 'lifetime' not in parameters:
             #     parameters['lifetime'] = 30
             if 'username' not in parameters or not parameters['username']:
                 if 'username' in self.get_request().environ and self.get_request().environ['username']:
                     parameters['username'] = self.get_request().environ['username']
-        except ValueError:
+
+            if additional_data_storage:
+                parameters['additional_data_storage'] = additional_data_storage
+        except Exception as error:
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.BadRequest, exc_cls=exceptions.BadRequest.__name__, exc_msg='Cannot decode json parameter dictionary')
 
         try:
             parameters = convert_old_req_2_workflow_req(parameters)
+            parameters = convert_data_to_use_additional_storage(parameters, additional_data_storage, with_add_storage, logger)
             request_id = add_request(**parameters)
         except exceptions.DuplicatedObject as error:
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.Conflict, exc_cls=error.__class__.__name__, exc_msg=error)
         except exceptions.IDDSException as error:
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
         except Exception as error:
-            print(error)
-            print(format_exc())
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
 
         return self.generate_http_response(HTTP_STATUS_CODE.OK, data={'request_id': request_id})
@@ -114,6 +157,7 @@ class Request(IDDSController):
             500 Internal Error
         """
         try:
+            logger = self.get_logger()
             request = self.get_request()
             parameters = request.data and json_loads(request.data)
             # parameters['status'] = RequestStatus.Extend
@@ -129,8 +173,8 @@ class Request(IDDSController):
         except exceptions.AuthenticationNoPermission as error:
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
         except Exception as error:
-            print(error)
-            print(format_exc())
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
 
         try:
@@ -152,8 +196,8 @@ class Request(IDDSController):
         except exceptions.IDDSException as error:
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
         except Exception as error:
-            print(error)
-            print(format_exc())
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
 
         return self.generate_http_response(HTTP_STATUS_CODE.OK, data={'status': 0, 'message': 'update successfully'})
@@ -169,6 +213,7 @@ class Request(IDDSController):
         """
 
         try:
+            logger = self.get_logger()
             if request_id == 'null':
                 request_id = None
             if workload_id == 'null':
@@ -205,8 +250,8 @@ class Request(IDDSController):
         except exceptions.IDDSException as error:
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
         except Exception as error:
-            print(error)
-            print(format_exc())
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
 
         return self.generate_http_response(HTTP_STATUS_CODE.OK, data=reqs)
@@ -231,14 +276,15 @@ class RequestName(IDDSController):
         :returns: {name:id} dict.
         """
         try:
+            logger = self.get_logger()
             rets = get_request_ids_by_name(name)
         except exceptions.NoObject as error:
             return self.generate_http_response(HTTP_STATUS_CODE.NotFound, exc_cls=error.__class__.__name__, exc_msg=error)
         except exceptions.IDDSException as error:
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
         except Exception as error:
-            print(error)
-            print(format_exc())
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
 
         return self.generate_http_response(HTTP_STATUS_CODE.OK, data=rets)
@@ -256,6 +302,7 @@ class RequestBuild(IDDSController):
             500 Internal Error
         """
         try:
+            logger = self.get_logger()
             parameters = self.get_request().data and json_loads(self.get_request().data)
             if 'signature' not in parameters or 'workflow' not in parameters:
                 raise exceptions.IDDSException("signature and workflow are required")
@@ -267,8 +314,6 @@ class RequestBuild(IDDSController):
             req = get_request(request_id=request_id)
             if not req:
                 raise exceptions.IDDSException("Request %s is not found" % request_id)
-            if req['status'] not in [RequestStatus.Building]:
-                raise exceptions.IDDSException("Request (request_id: %s, status: %s) is not in Building status" % (request_id, req['status']))
 
             build_workflow = req['request_metadata']['build_workflow']
             works = build_workflow.get_all_works()
@@ -277,6 +322,9 @@ class RequestBuild(IDDSController):
                 raise exceptions.IDDSException("Request (request_id: %s) has a different signature(%s != %s)" % (request_id,
                                                                                                                  signature,
                                                                                                                  build_work.get_signature()))
+            if 'workflow' in req['request_metadata'] and req['request_metadata']['workflow'] is not None:
+                raise exceptions.IDDSException(f"Request(request_id: {request_id}, status: {req['status']}) already has defined workflow")
+
             req['request_metadata']['workflow'] = workflow
 
             parameters = {'status': RequestStatus.Built,
@@ -285,8 +333,8 @@ class RequestBuild(IDDSController):
         except exceptions.IDDSException as error:
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
         except Exception as error:
-            print(error)
-            print(format_exc())
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
 
         return self.generate_http_response(HTTP_STATUS_CODE.OK, data={'request_id': request_id})
@@ -312,6 +360,7 @@ class RequestAbort(IDDSController):
             task_id = None
 
         try:
+            logger = self.get_logger()
             username = self.get_username()
             if task_id:
                 reqs = get_requests(request_id=request_id, workload_id=workload_id, with_processing=True)
@@ -336,8 +385,8 @@ class RequestAbort(IDDSController):
         except exceptions.AuthenticationNoPermission as error:
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
         except Exception as error:
-            print(error)
-            print(format_exc())
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
 
         try:
@@ -355,8 +404,61 @@ class RequestAbort(IDDSController):
         except exceptions.IDDSException as error:
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
         except Exception as error:
-            print(error)
-            print(format_exc())
+            logger.error(error)
+            logger.error(format_exc())
+            return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
+
+        return self.generate_http_response(HTTP_STATUS_CODE.OK, data=[(0, {'status': 0, 'message': 'Command registered successfully'})])
+
+
+class RequestClose(IDDSController):
+    """ Clsoe Request. """
+
+    def put(self, request_id, workload_id=None):
+        """ Close the request.
+        HTTP Success:
+            200 OK
+        HTTP Error:
+            400 Bad request
+            404 Not Found
+            500 Internal Error
+        """
+        if request_id == 'null':
+            request_id = None
+        if workload_id == 'null':
+            workload_id = None
+
+        try:
+            logger = self.get_logger()
+            username = self.get_username()
+            reqs = get_requests(request_id=request_id, workload_id=workload_id, with_request=True)
+
+            if not reqs:
+                return self.generate_http_response(HTTP_STATUS_CODE.OK, data=[(-1, {'status': -1, 'message': 'No match requests'})])
+
+            for req in reqs:
+                if req['username'] and req['username'] != username and not authenticate_is_super_user(username):
+                    msg = "User %s has no permission to update request %s(user: %s)" % (username, req['request_id'], req['username'])
+                    # raise exceptions.AuthenticationNoPermission(msg)
+                    return self.generate_http_response(HTTP_STATUS_CODE.OK, data=[(-1, {'status': -1, 'message': msg})])
+        except exceptions.AuthenticationNoPermission as error:
+            return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
+        except Exception as error:
+            logger.error(error)
+            logger.error(format_exc())
+            return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
+
+        try:
+            add_command(request_id=request_id, cmd_type=CommandType.CloseRequest,
+                        workload_id=workload_id, cmd_content=None, username=username)
+
+        except exceptions.NoObject as error:
+            return self.generate_http_response(HTTP_STATUS_CODE.NotFound, exc_cls=error.__class__.__name__, exc_msg=error)
+        except exceptions.IDDSException as error:
+            return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
+        except Exception as error:
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
 
         return self.generate_http_response(HTTP_STATUS_CODE.OK, data=[(0, {'status': 0, 'message': 'Command registered successfully'})])
@@ -381,6 +483,7 @@ class RequestRetry(IDDSController):
             workload_id = None
 
         try:
+            logger = self.get_logger()
             username = self.get_username()
             reqs = get_requests(request_id=request_id, workload_id=workload_id, with_request=True)
             if not reqs:
@@ -394,8 +497,8 @@ class RequestRetry(IDDSController):
         except exceptions.AuthenticationNoPermission as error:
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
         except Exception as error:
-            print(error)
-            print(format_exc())
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
 
         try:
@@ -408,8 +511,8 @@ class RequestRetry(IDDSController):
         except exceptions.IDDSException as error:
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=error.__class__.__name__, exc_msg=error)
         except Exception as error:
-            print(error)
-            print(format_exc())
+            logger.error(error)
+            logger.error(format_exc())
             return self.generate_http_response(HTTP_STATUS_CODE.InternalError, exc_cls=exceptions.CoreException.__name__, exc_msg=error)
 
         return self.generate_http_response(HTTP_STATUS_CODE.OK, data=[(0, {'status': 0, 'message': 'Command registered successfully'})])
@@ -440,6 +543,9 @@ def get_blueprint():
     request_abort = RequestAbort.as_view('request_abort')
     bp.add_url_rule('/request/abort/<request_id>/<workload_id>', view_func=request_abort, methods=['put', ])
     bp.add_url_rule('/request/abort/<request_id>/<workload_id>/task_id', view_func=request_abort, methods=['put', ])
+
+    request_close = RequestClose.as_view('request_close')
+    bp.add_url_rule('/request/close/<request_id>/<workload_id>', view_func=request_close, methods=['put', ])
 
     request_retry = RequestRetry.as_view('request_retry')
     bp.add_url_rule('/request/retry/<request_id>/<workload_id>', view_func=request_retry, methods=['put', ])

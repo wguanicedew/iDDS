@@ -6,10 +6,10 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2024
 
 
-FROM docker.io/almalinux:9.2
+FROM docker.io/almalinux:9.4
 
 ARG TAG
 
@@ -28,15 +28,27 @@ RUN yum-config-manager --enable crb
 # RUN yum install -y httpd.x86_64 conda gridsite mod_ssl.x86_64 httpd-devel.x86_64 gcc.x86_64 supervisor.noarch fetch-crl.noarch lcg-CA postgresql postgresql-contrib postgresql-static postgresql-libs postgresql-devel && \
 #     yum clean all && \
 #     rm -rf /var/cache/yum
-RUN yum install -y httpd.x86_64 which conda gridsite mod_ssl.x86_64 httpd-devel.x86_64 gcc.x86_64 supervisor.noarch fetch-crl.noarch redis syslog-ng procps passwd which && \
+RUN yum install -y httpd.x86_64 which conda gridsite mod_ssl.x86_64 httpd-devel.x86_64 gcc.x86_64 supervisor.noarch fetch-crl.noarch redis syslog-ng procps passwd which  systemd-udev wget voms-clients-java voms-clients-cpp && \
 yum clean all && \
 rm -rf /var/cache/yum
 
 # install postgres
-RUN yum install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
-RUN yum install --nogpgcheck -y postgresql16
+# RUN yum install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+# RUN yum install --nogpgcheck -y postgresql16
+RUN yum install --nogpgcheck -y postgresql
 RUN  yum clean all && rm -rf /var/cache/yum
 
+
+# install Oracle Instant Client
+RUN wget https://download.oracle.com/otn_software/linux/instantclient/oracle-instantclient-basic-linuxx64.rpm -P /tmp/ && \
+    yum install -y /tmp/oracle-instantclient-basic-linuxx64.rpm && \
+    wget https://download.oracle.com/otn_software/linux/instantclient/oracle-instantclient-sqlplus-linuxx64.rpm -P /tmp/ && \
+    yum install -y /tmp/oracle-instantclient-sqlplus-linuxx64.rpm && \
+    wget https://download.oracle.com/otn_software/linux/instantclient/oracle-instantclient-devel-linuxx64.rpm -P /tmp/ && \
+    yum install -y /tmp/oracle-instantclient-devel-linuxx64.rpm
+
+# install NATS
+RUN yum install -y https://github.com/nats-io/nats-server/releases/download/v2.11.9/nats-server-v2.11.9-amd64.rpm https://github.com/nats-io/natscli/releases/download/v0.2.4/nats-0.2.4-amd64.rpm
 
 # RUN curl http://repository.egi.eu/sw/production/cas/1/current/repo-files/EGI-trustanchors.repo -o /etc/yum.repos.d/EGI-trustanchors.repo/
 RUN curl https://repository.egi.eu/sw/production/cas/1/current/repo-files/egi-trustanchors.repo -o /etc/yum.repos.d/EGI-trustanchors.repo
@@ -45,10 +57,19 @@ RUN yum install -y fetch-crl.noarch ca-policy-egi-core && \
     yum clean all && \
     rm -rf /var/cache/yum
 
+# update network limitations
+# RUN echo 4096 > /proc/sys/net/core/somaxconn
+# RUN sysctl -w net.core.somaxconn=4096
+RUN echo 'net.core.somaxconn=4096' >> /etc/sysctl.d/999-net.somax.conf
+
 # setup env
 RUN adduser atlpan
 RUN groupadd zp
 RUN usermod -a -G zp atlpan
+
+# rubin users
+RUN groupadd -g 4085 rubin_users
+RUN usermod -aG rubin_users atlpan
 
 RUN mkdir /opt/idds
 RUN mkdir /var/log/idds
@@ -85,9 +106,9 @@ RUN source /etc/profile.d/conda.sh; conda activate /opt/idds
 RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade pip
 RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade setuptools
 
-RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade requests SQLAlchemy urllib3 retrying mod_wsgi flask futures stomp.py cx-Oracle  unittest2 pep8 flake8 pytest nose sphinx recommonmark sphinx-rtd-theme nevergrad
-RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade psycopg2-binary
-RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade rucio-clients-atlas rucio-clients panda-client-light
+RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade requests SQLAlchemy urllib3 retrying mod_wsgi flask futures stomp.py cx-Oracle oracledb unittest2 pep8 flake8 pytest nose sphinx recommonmark sphinx-rtd-theme nevergrad
+RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade psycopg2-binary nats-py asyncio
+RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade rucio-clients-atlas rucio-clients panda-client-light==1.5.92
 
 
 WORKDIR /tmp/src
@@ -138,12 +159,22 @@ RUN sed -i 's/Listen\ 80/#\ Listen\ 80/g' /etc/httpd/conf/httpd.conf
 RUN sed -i "s/WSGISocketPrefix\ \/var\/log\/idds\/wsgisocks\/wsgi/WSGISocketPrefix\ \/var\/idds\/wsgisocks\/wsgi/g" /opt/idds/config_default/httpd-idds-443-py39-cc7.conf
 
 # for idds daemons
-RUN ln -fs /opt/idds/config/idds/supervisord_idds.ini /etc/supervisord.d/idds.ini
+# RUN ln -fs /opt/idds/config/idds/supervisord_idds.ini /etc/supervisord.d/idds.ini
 # RUN ln -fs /opt/idds/config/idds/supervisord_iddsfake.ini /etc/supervisord.d/iddsfake.ini
+RUN ln -fs /opt/idds/config/idds/supervisord_idds_clerk.ini /etc/supervisord.d/idds_clerk.ini
+RUN ln -fs /opt/idds/config/idds/supervisord_idds_transformer.ini /etc/supervisord.d/idds_transformer.ini
+RUN ln -fs /opt/idds/config/idds/supervisord_idds_submitter.ini /etc/supervisord.d/idds_submitter.ini
+RUN ln -fs /opt/idds/config/idds/supervisord_idds_poller.ini /etc/supervisord.d/idds_poller.ini
+RUN ln -fs /opt/idds/config/idds/supervisord_idds_trigger.ini /etc/supervisord.d/idds_trigger.ini
+RUN ln -fs /opt/idds/config/idds/supervisord_idds_finisher.ini /etc/supervisord.d/idds_finisher.ini
+RUN ln -fs /opt/idds/config/idds/supervisord_idds_receiver.ini /etc/supervisord.d/idds_receiver.ini
+
 RUN ln -fs /opt/idds/config/idds/supervisord_httpd.ini /etc/supervisord.d/httpd.ini
 # RUN ln -fs /opt/idds/config/idds/supervisord_syslog-ng.ini /etc/supervisord.d/syslog-ng.ini
 RUN ln -fs /opt/idds/config/idds/supervisord_logrotate.ini /etc/supervisord.d/logrotate.ini
+RUN ln -fs /opt/idds/config/idds/supervisord_healthmonitor.ini /etc/supervisord.d/healthmonitor.ini
 RUN ln -fs /opt/idds/config/idds/logrotate_idds /etc/logrotate.d/idds
+RUN ln -fs /opt/idds/config/idds/supervisord_nats.ini /etc/supervisord.d/nats.ini
 
 # for syslog-ng
 RUN mv /etc/syslog-ng/syslog-ng.conf /etc/syslog-ng/syslog-ng.conf.back
@@ -153,6 +184,8 @@ ADD main/tools/syslog-ng/http.conf /etc/syslog-ng/conf.d/
 
 RUN chown atlpan -R /etc/grid-security/certificates
 
+RUN mkdir -p /data/idds_requests
+RUN chmod 777 /data/idds_requests
 RUN chmod -R 777 /opt/idds/config
 RUN chmod -R 777 /var/log/idds
 RUN chmod -R 777 /var/idds
@@ -175,6 +208,7 @@ RUN ln -s /opt/idds/etc/idds/rest/ssl.conf /etc/httpd/conf.d/ssl.conf
 
 VOLUME /var/log/idds
 VOLUME /opt/idds/config
+VOLUME /data/idds_requests
 
 ENTRYPOINT ["start-daemon.sh"]
 

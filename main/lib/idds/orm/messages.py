@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2024
 
 
 """
@@ -22,13 +22,14 @@ from sqlalchemy.exc import DatabaseError, IntegrityError
 
 from idds.common import exceptions
 from idds.common.constants import MessageDestination
+from idds.common.utils import group_list
 from idds.orm.base import models
-from idds.orm.base.session import read_session, transactional_session
+from idds.orm.base.session import transactional_session
 
 
 @transactional_session
 def add_message(msg_type, status, source, request_id, workload_id, transform_id,
-                num_contents, msg_content, bulk_size=None, processing_id=None,
+                num_contents, msg_content, internal_id=None, bulk_size=None, processing_id=None,
                 destination=MessageDestination.Outside, session=None):
     """
     Add a message to be submitted asynchronously to a message broker.
@@ -68,7 +69,7 @@ def add_message(msg_type, status, source, request_id, workload_id, transform_id,
         for msg_content, num_contents in zip(msg_content_list, num_contents_list):
             new_message = {'msg_type': msg_type, 'status': status, 'request_id': request_id,
                            'workload_id': workload_id, 'transform_id': transform_id,
-                           'source': source, 'num_contents': num_contents,
+                           'internal_id': internal_id, 'source': source, 'num_contents': num_contents,
                            'destination': destination, 'processing_id': processing_id,
                            'locking': 0, 'msg_content': msg_content}
             msgs.append(new_message)
@@ -101,9 +102,27 @@ def add_messages(messages, bulk_size=1000, session=None):
 
 
 @transactional_session
-def update_messages(messages, bulk_size=1000, session=None):
+def update_messages(messages, bulk_size=1000, use_bulk_update_mappings=False, request_id=None, transform_id=None, min_request_id=None, session=None):
     try:
-        session.bulk_update_mappings(models.Message, messages)
+        if use_bulk_update_mappings:
+            session.bulk_update_mappings(models.Message, messages)
+        else:
+            groups = group_list(messages, key='msg_id')
+            for group_key in groups:
+                group = groups[group_key]
+                keys = group['keys']
+                items = group['items']
+                query = session.query(models.Message)
+                if request_id:
+                    query = query.filter(models.Message.request_id == request_id)
+                else:
+                    if min_request_id:
+                        query = query.filter(or_(models.Message.request_id >= min_request_id,
+                                                 models.Message.request_id.is_(None)))
+                if transform_id:
+                    query = query.filter(models.Message.transform_id == transform_id)
+                query = query.filter(models.Message.msg_id.in_(keys))\
+                             .update(items, synchronize_session=False)
     except TypeError as e:
         raise exceptions.DatabaseException('Invalid JSON for msg_content: %s' % str(e))
     except DatabaseError as e:
@@ -114,11 +133,12 @@ def update_messages(messages, bulk_size=1000, session=None):
             raise exceptions.DatabaseException('Could not persist message: %s' % str(e))
 
 
-@read_session
+@transactional_session
 def retrieve_messages(bulk_size=1000, msg_type=None, status=None, source=None,
                       destination=None, request_id=None, workload_id=None,
                       transform_id=None, processing_id=None, fetching_id=None,
-                      use_poll_period=False, retries=None, delay=None, session=None):
+                      min_request_id=None, use_poll_period=False, retries=None,
+                      delay=None, internal_id=None, session=None):
     """
     Retrieve up to $bulk messages.
 
@@ -142,25 +162,36 @@ def retrieve_messages(bulk_size=1000, msg_type=None, status=None, source=None,
                 msg_type = [msg_type]
             if len(msg_type) == 1:
                 msg_type = [msg_type[0], msg_type[0]]
+        if status is not None:
+            if not isinstance(status, (list, tuple)):
+                status = [status]
+            if len(status) == 1:
+                status = [status[0], status[0]]
 
         query = session.query(models.Message)
 
         if msg_type is not None:
             query = query.filter(models.Message.msg_type.in_(msg_type))
         if status is not None:
-            query = query.filter_by(status=status)
+            query = query.filter(models.Message.status.in_(status))
         if source is not None:
             query = query.filter_by(source=source)
         if destination is not None:
             query = query.filter(models.Message.destination.in_(destination))
         if request_id is not None:
             query = query.filter_by(request_id=request_id)
+        else:
+            if min_request_id:
+                query = query.filter(or_(models.Message.request_id >= min_request_id,
+                                         models.Message.request_id.is_(None)))
         if workload_id is not None:
             query = query.filter_by(workload_id=workload_id)
         if transform_id is not None:
             query = query.filter_by(transform_id=transform_id)
         if processing_id is not None:
             query = query.filter_by(processing_id=processing_id)
+        if internal_id is not None:
+            query = query.filter_by(internal_id=internal_id)
         if retries:
             query = query.filter_by(retries=retries)
         if delay:

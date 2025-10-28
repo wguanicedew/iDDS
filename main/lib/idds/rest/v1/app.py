@@ -6,24 +6,26 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2024
 
 """----------------------
    Web service app
 ----------------------"""
 
 import logging
-import sys
+
 import flask
 from flask import Flask, Response
 
 from idds.common import exceptions
-from idds.common.authentication import authenticate_x509, authenticate_oidc, authenticate_is_super_user
-from idds.common.config import (config_has_section, config_has_option, config_get)
+# from idds.common.authentication import authenticate_x509, authenticate_oidc, authenticate_is_super_user
 from idds.common.constants import HTTP_STATUS_CODE
-from idds.common.utils import get_rest_debug
+from idds.common.utils import get_rest_debug, setup_logging
+# from idds.common.utils import get_rest_debug, setup_logging, get_logger
+from idds.core.authentication import authenticate_x509, authenticate_oidc, authenticate_is_super_user
 # from idds.common.utils import get_rest_url_prefix
 from idds.rest.v1 import requests
+from idds.rest.v1 import transforms
 from idds.rest.v1 import catalog
 from idds.rest.v1 import cacher
 from idds.rest.v1 import hyperparameteropt
@@ -32,11 +34,11 @@ from idds.rest.v1 import monitor
 from idds.rest.v1 import messages
 from idds.rest.v1 import ping
 from idds.rest.v1 import auth
+from idds.rest.v1 import metainfo
 
 
 class LoggingMiddleware(object):
     def __init__(self, app, logger, url_map):
-        import logging
         self._app = app
         self._logger = logger
         self._url_map = url_map
@@ -60,6 +62,7 @@ class LoggingMiddleware(object):
 def get_normal_blueprints():
     bps = []
     bps.append(requests.get_blueprint())
+    bps.append(transforms.get_blueprint())
     bps.append(catalog.get_blueprint())
     bps.append(cacher.get_blueprint())
     bps.append(hyperparameteropt.get_blueprint())
@@ -67,6 +70,7 @@ def get_normal_blueprints():
     # bps.append(monitor.get_blueprint())
     bps.append(messages.get_blueprint())
     bps.append(ping.get_blueprint())
+    bps.append(metainfo.get_blueprint())
 
     return bps
 
@@ -150,20 +154,10 @@ def after_request(response):
     return response
 
 
-def setup_logging(loglevel=None):
-    if loglevel is None:
-        if config_has_section('common') and config_has_option('common', 'loglevel'):
-            loglevel = getattr(logging, config_get('common', 'loglevel').upper())
-        else:
-            loglevel = logging.INFO
-
-    logging.basicConfig(stream=sys.stdout, level=loglevel,
-                        format='%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s')
-
-
 def create_app(auth_type=None):
 
-    setup_logging()
+    setup_logging(name='idds_app', log_file="idds_rest.log")
+    # get_logger(name='idds_app', filename='idds_rest.log')
 
     # url_prefix = get_rest_url_prefix()
     application = Flask(__name__)

@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2022 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2022 - 2025
 
 IDDS_SERVICE=$1
 
@@ -131,13 +131,30 @@ else
     echo "supervisord conf not found. will use the default one."
     cp /opt/idds/config_default/supervisord_idds.ini /opt/idds/config/idds/supervisord_idds.ini
     # cp /opt/idds/config_default/supervisord_iddsfake.ini /opt/idds/config/idds/supervisord_iddsfake.ini
+    cp /opt/idds/config_default/supervisord_idds_clerk.ini /opt/idds/config/idds/supervisord_idds_clerk.ini
+    cp /opt/idds/config_default/supervisord_idds_transformer.ini /opt/idds/config/idds/supervisord_idds_transformer.ini
+    cp /opt/idds/config_default/supervisord_idds_submitter.ini /opt/idds/config/idds/supervisord_idds_submitter.ini
+    cp /opt/idds/config_default/supervisord_idds_poller.ini /opt/idds/config/idds/supervisord_idds_poller.ini
+    cp /opt/idds/config_default/supervisord_idds_receiver.ini /opt/idds/config/idds/supervisord_idds_receiver.ini
+    cp /opt/idds/config_default/supervisord_idds_trigger.ini /opt/idds/config/idds/supervisord_idds_trigger.ini
+    cp /opt/idds/config_default/supervisord_idds_finisher.ini /opt/idds/config/idds/supervisord_idds_finisher.ini
+    
     cp /opt/idds/config_default/supervisord_httpd.ini /opt/idds/config/idds/supervisord_httpd.ini
     # cp /opt/idds/config_default/supervisord_syslog-ng.ini /opt/idds/config/idds/supervisord_syslog-ng.ini
 
+    echo "setup log rotation"
     cp /opt/idds/config_default/supervisord_logrotate.ini /opt/idds/config/idds/supervisord_logrotate.ini
     cp /opt/idds/config_default/logrotate_idds /opt/idds/config/idds/logrotate_idds
     cp /opt/idds/config_default/logrotate_daemon /opt/idds/config/idds/logrotate_daemon
     chmod +x /opt/idds/config/idds/logrotate_daemon
+    chown root /opt/idds/config/idds/logrotate_idds
+
+    echo "setup health monitor"
+    cp /opt/idds/config_default/supervisord_healthmonitor.ini /opt/idds/config/idds/
+    cp /opt/idds/config_default/healthmonitor_daemon /opt/idds/config/idds/
+    cp /opt/idds/config_default/idds_health_check.py /opt/idds/config/idds/
+    chmod +x /opt/idds/config/idds/healthmonitor_daemon
+    chmod +x /opt/idds/config/idds/idds_health_check.py
 fi
 
 if [ -f /etc/grid-security/hostkey.pem ]; then
@@ -152,6 +169,9 @@ else
     ln -fs /opt/idds/config/hostkey.pem /etc/grid-security/hostkey.pem
     chmod 600 /etc/grid-security/hostkey.pem
 fi
+
+cp /opt/idds/config_default/httpd_daemon.sh /opt/idds/config/idds/httpd_daemon.sh
+chmod a+rx /opt/idds/config/idds/httpd_daemon.sh
 
 mkdir -p /opt/idds/config/.panda/
 
@@ -179,13 +199,38 @@ if [ ! -z "$IDDS_PRINT_CFG" ]; then
     echo ""
 fi
 
+# min number of workers
+if [[ -z "${IDDS_SERVER_CONF_MIN_WORKERS}" ]]; then
+  export IDDS_SERVER_CONF_MIN_WORKERS=32
+fi
+
+# max number of workers
+if [[ -z "${IDDS_SERVER_CONF_MAX_WORKERS}" ]]; then
+  export IDDS_SERVER_CONF_MAX_WORKERS=512
+fi
+
+# max number of WSGI daemons
+if [[ -z "${IDDS_SERVER_CONF_NUM_WSGI}" ]]; then
+  export IDDS_SERVER_CONF_NUM_WSGI=32
+fi
+
+# max number of WSGI daemons
+if [[ -z "${IDDS_SERVER_CONF_MAX_BACKLOG}" ]]; then
+  export IDDS_SERVER_CONF_MAX_BACKLOG=511
+fi
+
+# max number of WSGI threads
+if [[ -z "${IDDS_SERVER_CONF_NUM_WSGI_THREAD}" ]]; then
+  export IDDS_SERVER_CONF_NUM_WSGI_THREAD=32
+fi
+
 # create database if not exists
 python /opt/idds/tools/env/create_database.py
 # upgrade database
 alembic upgrade heads
 
 # configure monitor
-python /opt/idds/tools/env/config_monitor.py -s ${IDDS_HOME}/monitor/data/conf.js.template -d ${IDDS_HOME}/monitor/data/conf.js  --host ${IDDS_SERVER}
+python /opt/idds/tools/env/config_monitor.py -s ${IDDS_HOME}/monitor/data/conf.js.template -d ${IDDS_HOME}/monitor/data/conf.js  --host ${IDDS_REST_HOST}
 
 if ! [ -f /opt/idds/config/.token ]; then
     echo "/opt/idds/config/.token does not exist."
@@ -194,10 +239,18 @@ if ! [ -f /opt/idds/config/.token ]; then
     fi
 fi
 
+# get vomsproxy renew
+cp /opt/idds/config_default/vomsprox-renew /opt/idds/config/vomsprox-renew
+chmod +x /opt/idds/config/vomsprox-renew
+if [ -d "/opt/idds/sandbox/vomses" ] && [ ! -e "/etc/vomses" ]; then
+    ln -s /opt/idds/sandbox/vomses /etc/vomses
+fi
+
 # fetch-crl cron
 cronExec=/opt/idds/cronExec
 cat <<EOT >> ${cronExec}
 while true; do /usr/sbin/fetch-crl; sleep 36000; done &
+while true; do /opt/idds/config/vomsprox-renew; sleep 50000; done &
 EOT
 chmod +x ${cronExec}
 bash ${cronExec}
@@ -212,6 +265,16 @@ if [ ! -h /var/lib/redis ]; then
 fi
 /usr/bin/redis-server /etc/redis/redis.conf --supervised systemd &
 
+# start NATS
+cp /opt/idds/config_default/supervisord_nats.ini /opt/idds/config/idds/supervisord_nats.ini
+cp /opt/idds/config_default/nats_daemon.sh /opt/idds/config/idds/nats_daemon.sh
+chmod +x /opt/idds/config/idds/nats_daemon.sh
+if [ ! -z "$NATS_TOKEN" ]; then
+    # Replace ${NATS_TOKEN} in the file with the actual value
+    sed -i "s|\${NATS_TOKEN}|$NATS_TOKEN|g" /opt/idds/config/idds/nats_daemon.sh
+fi
+
+
 echo "clean heartbeats"
 python /opt/idds/tools/env/clean_heartbeat.py
 
@@ -220,7 +283,8 @@ if [ "${IDDS_SERVICE}" == "rest" ]; then
   # systemctl restart httpd.service
   # systemctl enable httpd.service
   # systemctl status httpd.service
-  /usr/sbin/httpd
+  # /usr/sbin/httpd
+  /usr/bin/supervisord -c /etc/supervisord.conf
 elif [ "${IDDS_SERVICE}" == "daemon" ]; then
   echo "starting iDDS ${IDDS_SERVICE} service"
   # systemctl enable supervisord

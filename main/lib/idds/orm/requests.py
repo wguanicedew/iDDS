@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2022
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2025
 
 
 """
@@ -17,13 +17,14 @@ import datetime
 import random
 
 import sqlalchemy
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, select, not_
 from sqlalchemy.exc import DatabaseError, IntegrityError
 from sqlalchemy.sql.expression import asc, desc
 
 from idds.common import exceptions
-from idds.common.constants import RequestType, RequestStatus, RequestLocking
-from idds.orm.base.session import read_session, transactional_session
+from idds.common.constants import RequestType, RequestStatus, RequestLocking, CommandType
+from idds.common.utils import get_process_thread_info
+from idds.orm.base.session import read_session, transactional_session, safe_bulk_update_mappings
 from idds.orm.base import models
 
 
@@ -31,8 +32,11 @@ def create_request(scope=None, name=None, requester=None, request_type=None,
                    username=None, userdn=None, transform_tag=None,
                    status=RequestStatus.New, locking=RequestLocking.Idle, priority=0,
                    lifetime=None, workload_id=None, request_metadata=None,
-                   new_poll_period=1, update_poll_period=10,
+                   new_poll_period=1, update_poll_period=10, site=None,
+                   cloud=None, queue=None, command=CommandType.NoneCommand,
                    new_retries=0, update_retries=0, max_new_retries=3, max_update_retries=0,
+                   group_id=None, campaign=None, campaign_scope=None, campaign_group=None,
+                   campaign_tag=None, additional_data_storage=None,
                    processing_metadata=None):
     """
     Create a request.
@@ -80,9 +84,12 @@ def create_request(scope=None, name=None, requester=None, request_type=None,
                                  username=username, userdn=userdn,
                                  transform_tag=transform_tag, status=status, locking=locking,
                                  priority=priority, workload_id=workload_id,
-                                 expired_at=expired_at,
+                                 expired_at=expired_at, site=site, additional_data_storage=additional_data_storage,
+                                 cloud=cloud, queue=queue, command=command,
                                  new_retries=new_retries, update_retries=update_retries,
                                  max_new_retries=max_new_retries, max_update_retries=max_update_retries,
+                                 group_id=group_id, campaign=campaign, campaign_scope=campaign_scope,
+                                 campaign_group=campaign_group, campaign_tag=campaign_tag,
                                  request_metadata=request_metadata, processing_metadata=processing_metadata)
     if new_poll_period:
         new_poll_period = datetime.timedelta(seconds=new_poll_period)
@@ -98,8 +105,11 @@ def add_request(scope=None, name=None, requester=None, request_type=None,
                 username=None, userdn=None, transform_tag=None,
                 status=RequestStatus.New, locking=RequestLocking.Idle, priority=0,
                 lifetime=None, workload_id=None, request_metadata=None,
-                new_poll_period=1, update_poll_period=10,
+                new_poll_period=1, update_poll_period=10, site=None,
+                cloud=None, queue=None, command=CommandType.NoneCommand,
                 new_retries=0, update_retries=0, max_new_retries=3, max_update_retries=0,
+                group_id=None, campaign=None, campaign_scope=None, campaign_group=None,
+                campaign_tag=None, additional_data_storage=None,
                 processing_metadata=None, session=None):
     """
     Add a request.
@@ -128,10 +138,15 @@ def add_request(scope=None, name=None, requester=None, request_type=None,
                                      username=username, userdn=userdn,
                                      transform_tag=transform_tag, status=status, locking=locking,
                                      priority=priority, workload_id=workload_id, lifetime=lifetime,
-                                     new_poll_period=new_poll_period,
+                                     new_poll_period=new_poll_period, site=site,
+                                     cloud=cloud, queue=queue,
+                                     command=command,
                                      update_poll_period=update_poll_period,
+                                     additional_data_storage=additional_data_storage,
                                      new_retries=new_retries, update_retries=update_retries,
                                      max_new_retries=max_new_retries, max_update_retries=max_update_retries,
+                                     group_id=group_id, campaign=campaign, campaign_scope=campaign_scope,
+                                     campaign_group=campaign_group, campaign_tag=campaign_tag,
                                      request_metadata=request_metadata, processing_metadata=processing_metadata)
         new_request.save(session=session)
         request_id = new_request.request_id
@@ -230,17 +245,16 @@ def get_request(request_id, to_json=False, session=None):
     """
 
     try:
-        query = session.query(models.Request)\
-                       .filter(models.Request.request_id == request_id)
+        query = select(models.Request).where(models.Request.request_id == request_id)
 
-        ret = query.first()
+        ret = session.execute(query).fetchone()
         if not ret:
             return None
         else:
             if to_json:
-                return ret.to_dict_json()
+                return ret[0].to_dict_json()
             else:
-                return ret.to_dict()
+                return ret[0].to_dict()
     except sqlalchemy.orm.exc.NoResultFound as error:
         raise exceptions.NoObject('request request_id: %s cannot be found: %s' % (request_id, error))
 
@@ -262,32 +276,41 @@ def get_request_by_id_status(request_id, status=None, locking=False, session=Non
     """
 
     try:
-        query = session.query(models.Request)\
-                       .filter(models.Request.request_id == request_id)
+        query = select(models.Request).filter(models.Request.request_id == request_id)
 
         if status:
             if not isinstance(status, (list, tuple)):
                 status = [status]
             if len(status) == 1:
                 status = [status[0], status[0]]
-            query = query.filter(models.Request.status.in_(status))
+            query = query.where(models.Request.status.in_(status))
 
         if locking:
-            query = query.filter(models.Request.locking == RequestLocking.Idle)
+            query = query.where(models.Request.locking == RequestLocking.Idle)
             query = query.with_for_update(skip_locked=True)
 
-        ret = query.first()
+        ret = session.execute(query).fetchone()
         if not ret:
             return None
         else:
-            return ret.to_dict()
+            if locking:
+                ret[0].updated_at = datetime.datetime.utcnow()
+                ret[0].locking = RequestLocking.Locking
+                hostname, pid, thread_id, thread_name = get_process_thread_info()
+                ret[0].locking_hostname = hostname
+                ret[0].locking_pid = pid
+                ret[0].locking_thread_id = thread_id
+                ret[0].locking_thread_name = thread_name
+
+            return ret[0].to_dict()
     except sqlalchemy.orm.exc.NoResultFound as error:
         raise exceptions.NoObject('request request_id: %s cannot be found: %s' % (request_id, error))
 
 
 @read_session
-def get_requests(request_id=None, workload_id=None, with_detail=False, with_metadata=False,
-                 with_request=False, with_transform=False, with_processing=False, to_json=False, session=None):
+def get_requests_old(request_id=None, workload_id=None, with_detail=False, with_metadata=False,
+                     with_request=False, with_transform=False, with_processing=False, to_json=False,
+                     session=None):
     """
     Get a request or raise a NoObject exception.
 
@@ -695,6 +718,276 @@ def get_requests(request_id=None, workload_id=None, with_detail=False, with_meta
         raise exceptions.NoObject('request workload_id: %s cannot be found: %s' % (workload_id, error))
 
 
+@read_session
+def get_requests_only(request_id=None, workload_id=None, with_metadata=False, to_json=False, session=None):
+    """
+    Get requests or raise a NoObject exception.
+
+    :param request_id: The request id.
+    :param workload_id: The workload id of the request.
+    :param with_metadata: To show metadata.
+    :param to_json: return json format.
+
+    :param session: The database session in use.
+
+    :raises NoObject: If no request is founded.
+
+    :returns: Requests.
+    """
+    if with_metadata:
+        query = select(models.Request)
+        if request_id:
+            query = query.where(models.Request.request_id == request_id)
+        if workload_id:
+            query = query.where(models.Request.workload_id == workload_id)
+
+        tmp = session.execute(query).fetchall()
+        rets = []
+        if tmp:
+            for t in tmp:
+                t_dict = t[0].to_dict()
+                rets.append(t_dict)
+        return rets
+    else:
+        exception_columns = ['request_metadata', 'processing_metadata', '_request_metadata', '_processing_metadata']
+        columns = [column for column in models.Request.__mapper__.columns if column.name not in exception_columns]
+        column_names = [column.name for column in columns]
+        query = select(*columns)
+
+        if request_id:
+            query = query.where(models.Request.request_id == request_id)
+        if workload_id:
+            query = query.where(models.Request.workload_id == workload_id)
+
+        tmp = session.execute(query).fetchall()
+        rets = []
+        if tmp:
+            for t in tmp:
+                t_dict = dict(zip(column_names, t))
+                rets.append(t_dict)
+    return rets
+
+
+def get_query_collection(request_id=None, workload_id=None):
+    """
+    Get input collection query and output collection query.
+    """
+    input_query = select(models.Collection.coll_id.label("input_coll_id"),
+                         models.Collection.transform_id.label("input_coll_transform_id"),
+                         models.Collection.scope.label("input_coll_scope"),
+                         models.Collection.name.label("input_coll_name"),
+                         models.Collection.status.label("input_coll_status"),
+                         models.Collection.bytes.label("input_coll_bytes"),
+                         models.Collection.total_files.label("input_total_files"),
+                         models.Collection.processed_files.label("input_processed_files"),
+                         models.Collection.new_files.label("input_new_files"),
+                         models.Collection.failed_files.label("input_failed_files"),
+                         models.Collection.missing_files.label("input_missing_files"),
+                         models.Collection.processing_files.label("input_processing_files"))\
+        .where(models.Collection.relation_type == 0)
+
+    output_query = select(models.Collection.coll_id.label("output_coll_id"),
+                          models.Collection.transform_id.label("output_coll_transform_id"),
+                          models.Collection.scope.label("output_coll_scope"),
+                          models.Collection.name.label("output_coll_name"),
+                          models.Collection.status.label("output_coll_status"),
+                          models.Collection.bytes.label("output_coll_bytes"),
+                          models.Collection.total_files.label("output_total_files"),
+                          models.Collection.processed_files.label("output_processed_files"),
+                          models.Collection.new_files.label("output_new_files"),
+                          models.Collection.failed_files.label("output_failed_files"),
+                          models.Collection.missing_files.label("output_missing_files"),
+                          models.Collection.processing_files.label("output_processing_files"))\
+        .where(models.Collection.relation_type == 1)
+
+    if request_id:
+        input_query = input_query.where(models.Request.request_id == request_id)
+        output_query = output_query.where(models.Request.request_id == request_id)
+    if workload_id:
+        input_query = input_query.where(models.Request.workload_id == workload_id)
+        output_query = output_query.where(models.Request.workload_id == workload_id)
+    return input_query, output_query
+
+
+def get_query_transform(request_id=None, workload_id=None):
+    """
+    Get transform query.
+    """
+    columns = [models.Transform.request_id,
+               models.Transform.transform_id,
+               models.Transform.transform_type,
+               models.Transform.name.label("transform_name"),
+               models.Transform.workload_id.label("transform_workload_id"),
+               models.Transform.status.label("transform_status"),
+               models.Transform.created_at.label("transform_created_at"),
+               models.Transform.updated_at.label("transform_updated_at"),
+               models.Transform.finished_at.label("transform_finished_at")]
+    query = select(*columns)
+    if request_id:
+        query = query.where(models.Request.request_id == request_id)
+    if workload_id:
+        query = query.where(models.Request.workload_id == workload_id)
+
+    return query
+
+
+def get_query_processing(request_id=None, workload_id=None):
+    """
+    Get processing query.
+    """
+    query = select(models.Processing.processing_id,
+                   models.Processing.transform_id.label("processing_transform_id"),
+                   models.Processing.workload_id.label("processing_workload_id"),
+                   models.Processing.status.label("processing_status"),
+                   models.Processing.created_at.label("processing_created_at"),
+                   models.Processing.updated_at.label("processing_updated_at"),
+                   models.Processing.finished_at.label("processing_finished_at"))
+    if request_id:
+        query = query.where(models.Request.request_id == request_id)
+    if workload_id:
+        query = query.where(models.Request.workload_id == workload_id)
+
+    return query
+
+
+def get_request_dict(column_names, column):
+    """
+    Parse request column data to dictionary
+    """
+    t_dict = dict(zip(column_names, column))
+
+    if 'request_metadata' in t_dict and t_dict['request_metadata']:
+        if 'workflow' in t_dict['request_metadata']:
+            workflow = t_dict['request_metadata']['workflow']
+            workflow_data = None
+            if 'processing_metadata' in t_dict and t_dict['processing_metadata'] and 'workflow_data' in t_dict['processing_metadata']:
+                workflow_data = t_dict['processing_metadata']['workflow_data']
+            if workflow is not None and workflow_data is not None:
+                workflow.metadata = workflow_data
+                t_dict['request_metadata']['workflow'] = workflow
+        if 'build_workflow' in t_dict['request_metadata']:
+            build_workflow = t_dict['request_metadata']['build_workflow']
+            build_workflow_data = None
+            if 'processing_metadata' in t_dict and t_dict['processing_metadata'] and 'build_workflow_data' in t_dict['processing_metadata']:
+                build_workflow_data = t_dict['processing_metadata']['build_workflow_data']
+            if build_workflow is not None and build_workflow_data is not None:
+                build_workflow.metadata = build_workflow_data
+                t_dict['request_metadata']['build_workflow'] = build_workflow
+    return t_dict
+
+
+@read_session
+def get_requests_with_transform(request_id=None, workload_id=None, with_metadata=False, show_processing=False,
+                                show_collection=False, to_json=False, session=None):
+    """
+    Get requests or raise a NoObject exception.
+
+    :param request_id: The request id.
+    :param workload_id: The workload id of the request.
+    :param with_metadata: To show metadata.
+    :param to_json: return json format.
+
+    :param session: The database session in use.
+
+    :raises NoObject: If no request is founded.
+
+    :returns: Requests.
+    """
+    exception_columns = ['request_metadata', 'processing_metadata', '_request_metadata', '_processing_metadata']
+    columns = [column for column in models.Request.__mapper__.columns if column.name not in exception_columns]
+    if with_metadata:
+        meta_columns = [models.Request._request_metadata.label('request_metadata'),
+                        models.Request._processing_metadata.label('processing_metadata')]
+        columns = columns + meta_columns
+
+    transform_query = get_query_transform(request_id=request_id, workload_id=workload_id)
+    transform_subquery = transform_query.subquery()
+    transform_subquery_columns = [column for column in transform_subquery.c]
+    columns = columns + transform_subquery_columns
+
+    if show_processing:
+        processing_query = get_query_processing(request_id=request_id, workload_id=workload_id)
+        processing_subquery = processing_query.subquery()
+        processing_subquery_columns = [column for column in processing_subquery.c]
+        columns = columns + processing_subquery_columns
+
+    if show_collection:
+        input_query, output_query = get_query_collection(request_id=request_id, workload_id=workload_id)
+        input_subquery = input_query.subquery()
+        output_subquery = output_query.subquery()
+        input_subquery_columns = [column for column in input_subquery.c]
+        output_subquery_columns = [column for column in output_subquery.c]
+        columns = columns + input_subquery_columns + output_subquery_columns
+
+    column_names = [column.name for column in columns]
+
+    query = select(*columns)
+    if request_id:
+        query = query.where(models.Request.request_id == request_id)
+    if workload_id:
+        query = query.where(models.Request.workload_id == workload_id)
+
+    query = query.outerjoin(transform_subquery, and_(models.Request.request_id == transform_subquery.c.request_id))
+    if show_processing:
+        query = query.outerjoin(processing_subquery, and_(processing_subquery.c.processing_transform_id == transform_subquery.c.transform_id))
+    if show_collection:
+        query = query.outerjoin(input_subquery, and_(input_subquery.c.input_coll_transform_id == transform_subquery.c.transform_id))
+        query = query.outerjoin(output_subquery, and_(output_subquery.c.output_coll_transform_id == transform_subquery.c.transform_id))
+    query = query.order_by(asc(models.Request.request_id))
+
+    tmp = session.execute(query).fetchall()
+    rets = []
+    if tmp:
+        for t in tmp:
+            t_dict = get_request_dict(column_names, t)
+            rets.append(t_dict)
+    return rets
+
+
+@read_session
+def get_requests(request_id=None, workload_id=None, with_detail=False, with_metadata=False,
+                 with_request=False, with_transform=False, with_processing=False, to_json=False, session=None):
+    """
+    Get requests or raise a NoObject exception.
+
+    :param request_id: The request id.
+    :param workload_id: The workload id of the request.
+    :param with_detail: To show the details with collections information.
+    :param with_metadata: To show metadata.
+    :param with_request: Only show requests.
+    :param with_transform: Show transforms as addition.
+    :param with_processing: Show transforms and processings as addition.
+    :param to_json: return json format.
+
+    :param session: The database session in use.
+
+    :raises NoObject: If no request is founded.
+
+    :returns: Requests.
+    """
+    try:
+        show_transform, show_processing, show_collection = False, False, False
+        if with_transform:
+            show_transform = True
+        if with_processing:
+            show_transform, show_processing = True, True
+        if with_detail:
+            show_transform, show_processing, show_collection = True, True, True
+
+        if show_transform:
+            return get_requests_with_transform(request_id=request_id, workload_id=workload_id,
+                                               with_metadata=with_metadata, to_json=to_json,
+                                               show_processing=show_processing,
+                                               show_collection=show_collection,
+                                               session=session)
+        else:
+            return get_requests_only(request_id=request_id, workload_id=workload_id,
+                                     with_metadata=with_metadata, to_json=to_json,
+                                     session=session)
+    except Exception as error:
+        raise exceptions.NoObject(f'request(request_id: {request_id}) cannot be found: {error}')
+
+
 @transactional_session
 def extend_requests(request_id=None, workload_id=None, lifetime=30, session=None):
     """
@@ -782,7 +1075,8 @@ def get_requests_by_requester(scope, name, requester, to_json=False, session=Non
 @transactional_session
 def get_requests_by_status_type(status, request_type=None, time_period=None, request_ids=[], locking=False,
                                 locking_for_update=False, bulk_size=None, to_json=False, by_substatus=False,
-                                new_poll=False, update_poll=False, only_return_id=False, session=None):
+                                min_request_id=None, new_poll=False, update_poll=False, only_return_id=False,
+                                not_lock=False, session=None):
     """
     Get requests.
 
@@ -823,6 +1117,9 @@ def get_requests_by_status_type(status, request_type=None, time_period=None, req
             query = query.filter(models.Request.request_type == request_type)
         if request_ids:
             query = query.filter(models.Request.request_id.in_(request_ids))
+        else:
+            if min_request_id is not None:
+                query = query.filter(models.Request.request_id >= min_request_id)
         if locking:
             query = query.filter(models.Request.locking == RequestLocking.Idle)
 
@@ -831,8 +1128,9 @@ def get_requests_by_status_type(status, request_type=None, time_period=None, req
         else:
             # query = query.order_by(asc(models.Request.updated_at))\
             #              .order_by(desc(models.Request.priority))
-            query = query.order_by(desc(models.Request.priority))\
-                         .order_by(asc(models.Request.updated_at))
+            # query = query.order_by(desc(models.Request.priority))\
+            #              .order_by(asc(models.Request.updated_at))
+            query = query.order_by(asc(models.Request.updated_at))
 
         if bulk_size:
             query = query.limit(bulk_size)
@@ -841,6 +1139,16 @@ def get_requests_by_status_type(status, request_type=None, time_period=None, req
         rets = []
         if tmp:
             for req in tmp:
+                if locking:
+                    req.updated_at = datetime.datetime.utcnow()
+                    req.locking = RequestLocking.Locking
+
+                    hostname, pid, thread_id, thread_name = get_process_thread_info()
+                    req.locking_hostname = hostname
+                    req.locking_pid = pid
+                    req.locking_thread_id = thread_id
+                    req.locking_thread_name = thread_name
+
                 if only_return_id:
                     rets.append(req[0])
                 else:
@@ -854,7 +1162,7 @@ def get_requests_by_status_type(status, request_type=None, time_period=None, req
 
 
 @transactional_session
-def update_request(request_id, parameters, update_request_metadata=False, session=None):
+def update_request(request_id, parameters, update_request_metadata=False, locking=False, origin_status=None, session=None):
     """
     update an request.
 
@@ -879,7 +1187,8 @@ def update_request(request_id, parameters, update_request_metadata=False, sessio
                 workflow = parameters['request_metadata']['workflow']
 
                 if workflow is not None:
-                    workflow.refresh_works()
+                    if hasattr(workflow, 'refresh_works'):
+                        workflow.refresh_works()
                     if 'processing_metadata' not in parameters or not parameters['processing_metadata']:
                         parameters['processing_metadata'] = {}
                     parameters['processing_metadata']['workflow_data'] = workflow.metadata
@@ -901,10 +1210,33 @@ def update_request(request_id, parameters, update_request_metadata=False, sessio
         if 'processing_metadata' in parameters:
             parameters['_processing_metadata'] = parameters['processing_metadata']
             del parameters['processing_metadata']
-        session.query(models.Request).filter_by(request_id=request_id)\
-               .update(parameters, synchronize_session=False)
+
+        query = session.query(models.Request).filter_by(request_id=request_id)
+
+        if locking:
+            query = query.filter(models.Request.locking == RequestLocking.Idle)
+            query = query.with_for_update(skip_locked=True)
+            num_rows = query.update(parameters, synchronize_session=False)
+            return num_rows
+        else:
+            build_status = [RequestStatus.Built, RequestStatus.Built]
+            if origin_status and origin_status not in build_status:
+                query_no_built = query.filter(not_(models.Request.status.in_(build_status)))
+
+                num_rows = query_no_built.update(parameters, synchronize_session=False)
+                if num_rows > 0:
+                    return num_rows
+                else:
+                    if 'status' in parameters:
+                        parameters['status'] = origin_status
+                    num_rows = query.update(parameters, synchronize_session=False)
+                return num_rows
+            else:
+                num_rows = query.update(parameters, synchronize_session=False)
+                return num_rows
     except sqlalchemy.orm.exc.NoResultFound as error:
         raise exceptions.NoObject('Request %s cannot be found: %s' % (request_id, error))
+    return 0
 
 
 @transactional_session
@@ -929,17 +1261,47 @@ def delete_requests(request_id=None, workload_id=None, session=None):
 
 
 @transactional_session
-def clean_locking(time_period=3600, session=None):
+def clean_locking(time_period=3600, min_request_id=None, health_items=[], force=False, hostname=None, pid=None, session=None):
     """
     Clearn locking which is older than time period.
 
     :param time_period in seconds
     """
+    health_dict = {}
+    for item in health_items:
+        hostname = item['hostname']
+        pid = item['pid']
+        thread_id = item['thread_id']
+        if hostname not in health_dict:
+            health_dict[hostname] = {}
+        if pid not in health_dict[hostname]:
+            health_dict[hostname][pid] = []
+        if thread_id not in health_dict[hostname][pid]:
+            health_dict[hostname][pid].append(thread_id)
+    query = session.query(models.Request.request_id,
+                          models.Request.locking_hostname,
+                          models.Request.locking_pid,
+                          models.Request.locking_thread_id,
+                          models.Request.locking_thread_name,
+                          models.Request.updated_at)
+    query = query.filter(models.Request.locking == RequestLocking.Locking)
+    if min_request_id:
+        query = query.filter(models.Request.request_id >= min_request_id)
 
-    params = {'locking': 0}
-    session.query(models.Request).filter(models.Request.locking == RequestLocking.Locking)\
-           .filter(models.Request.updated_at < datetime.datetime.utcnow() - datetime.timedelta(seconds=time_period))\
-           .update(params, synchronize_session=False)
+    lost_request_ids = []
+    tmp = query.all()
+    if tmp:
+        for req in tmp:
+            req_id, locking_hostname, locking_pid, locking_thread_id, locking_thread_name, updated_at = req
+            if (
+                (locking_hostname not in health_dict or locking_pid not in health_dict[locking_hostname])
+                or (force and hostname == locking_hostname and pid == locking_pid)      # noqa W503,
+                or (updated_at < datetime.datetime.utcnow() - datetime.timedelta(seconds=time_period))    # noqa W503
+            ):
+                lost_request_ids.append({"request_id": req_id, 'locking': 0})
+
+    # session.bulk_update_mappings(models.Request, lost_request_ids)
+    safe_bulk_update_mappings(session, models.Request, lost_request_ids)
 
 
 @transactional_session
@@ -1018,3 +1380,26 @@ def get_active_requests(active_status=None, session=None):
         return tmp
     except Exception as error:
         raise error
+
+
+@read_session
+def get_min_request_id(difference=1000, session=None):
+    try:
+        seq = models.get_request_sequence()
+        row = session.query(seq.next_value()).one()
+        if row:
+            max_request_id = row[0]
+            return max_request_id - difference
+        else:
+            return 0
+    except Exception:
+        try:
+            query = session.query(func.max(models.Request.request_id))
+            row = query.one()
+            if row:
+                max_request_id = row[0]
+                return max_request_id - difference
+            else:
+                return 0
+        except Exception as error:
+            raise error

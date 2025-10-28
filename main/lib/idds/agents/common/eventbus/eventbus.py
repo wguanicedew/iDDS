@@ -25,7 +25,8 @@ class Singleton(object):
 
     def __new__(class_, *args, **kwargs):
         if not isinstance(class_._instance, class_):
-            class_._instance = object.__new__(class_, *args, **kwargs)
+            # class_._instance = object.__new__(class_, *args, **kwargs)
+            class_._instance = super(Singleton, class_).__new__(class_)
             class_._instance._initialized = False
         return class_._instance
 
@@ -63,14 +64,13 @@ class EventBus(Singleton):
 
     @property
     def backend(self):
-        if self._backend and isinstance(self._backend, MsgEventBusBackend) and not self._backend.is_ok():
+        if self._backend and self._backend == self._orig_backend and not self._backend.is_ok():
             # self._orig_backend = self._backend
             # self._backend = BaseEventBusBackendOpt(logger=self.logger, **self.attrs)
             self._backend = self._backup_backend
-            self.logger.critical("MsgEventBusBackend failed, switch to use BaseEventBusBackendOpt")
-        elif self._orig_backend and isinstance(self._orig_backend, MsgEventBusBackend) and self._orig_backend.is_ok():
-            if self._backend != self._orig_backend:
-                self.logger.critical("MsgEventBusBackend is ok, switch back to use it")
+            self.logger.critical("Original backend <{self._orig_backend}> failed, switch to use backup backend <{self._backup_backend}>")
+        elif self._orig_backend and self._orig_backend != self._backend and self._orig_backend.is_ok():
+            self.logger.critical("Original backend <{self._orig_backend}> is ok, switch back to use it")
             self._backend = self._orig_backend
             # self._orig_backend = None
         return self._backend
@@ -107,13 +107,13 @@ class EventBus(Singleton):
     def publish_event(self, event):
         self.backend.send(event)
 
-    def get_event(self, event_type, num_events=1):
+    def get_event(self, event_type, num_events=1, wait=5, callback=None):
         # demand_event = DemandEvent(event._event_type, self._id)
-        event = self.backend.get(event_type, num_events=num_events, wait=10)
+        event = self.backend.get(event_type, num_events=num_events, wait=wait, callback=callback)
         return event
 
-    def get(self, event_type, num_events=1):
-        return self.get_event(event_type, num_events=num_events)
+    def get(self, event_type, num_events=1, wait=5, callback=None):
+        return self.get_event(event_type, num_events=num_events, wait=wait, callback=callback)
 
     def send(self, event):
         return self.publish_event(event)

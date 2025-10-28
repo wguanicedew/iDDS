@@ -6,13 +6,14 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2024
 
 
 """
 operations related to Messages.
 """
 
+import datetime
 import threading
 
 from idds.common.constants import MessageDestination, MessageType, MessageStatus
@@ -22,7 +23,7 @@ from idds.orm import messages as orm_messages
 
 @transactional_session
 def add_message(msg_type, status, source, request_id, workload_id, transform_id,
-                num_contents, msg_content, bulk_size=None, processing_id=0,
+                num_contents, msg_content, internal_id=None, bulk_size=None, processing_id=0,
                 destination=MessageDestination.Outside, session=None):
     """
     Add a message to be submitted asynchronously to a message broker.
@@ -37,7 +38,8 @@ def add_message(msg_type, status, source, request_id, workload_id, transform_id,
                                     request_id=request_id, workload_id=workload_id,
                                     transform_id=transform_id, num_contents=num_contents,
                                     destination=destination, processing_id=processing_id,
-                                    bulk_size=bulk_size, msg_content=msg_content, session=session)
+                                    internal_id=internal_id, bulk_size=bulk_size,
+                                    msg_content=msg_content, session=session)
 
 
 @transactional_session
@@ -45,11 +47,13 @@ def add_messages(messages, bulk_size=1000, session=None):
     return orm_messages.add_messages(messages, bulk_size=bulk_size, session=session)
 
 
-@read_session
+@transactional_session
 def retrieve_messages(bulk_size=None, msg_type=None, status=None, destination=None,
                       source=None, request_id=None, workload_id=None, transform_id=None,
                       processing_id=None, use_poll_period=False, retries=None, delay=None,
-                      fetching_id=None, session=None):
+                      min_request_id=None, fetching_id=None, internal_id=None,
+                      record_fetched=False, record_fetched_status=MessageStatus.Fetched,
+                      session=None):
     """
     Retrieve up to $bulk messages.
 
@@ -65,12 +69,24 @@ def retrieve_messages(bulk_size=None, msg_type=None, status=None, destination=No
         hb_thread = threading.current_thread()
         fetching_id = hb_thread.ident
 
-    return orm_messages.retrieve_messages(bulk_size=bulk_size, msg_type=msg_type,
-                                          status=status, source=source, destination=destination,
-                                          request_id=request_id, workload_id=workload_id,
-                                          transform_id=transform_id, processing_id=processing_id,
-                                          retries=retries, delay=delay, fetching_id=fetching_id,
-                                          use_poll_period=use_poll_period, session=session)
+    messages = orm_messages.retrieve_messages(bulk_size=bulk_size, msg_type=msg_type,
+                                              status=status, source=source, destination=destination,
+                                              request_id=request_id, workload_id=workload_id,
+                                              transform_id=transform_id, processing_id=processing_id,
+                                              retries=retries, delay=delay, fetching_id=fetching_id,
+                                              min_request_id=min_request_id, internal_id=internal_id,
+                                              use_poll_period=use_poll_period, session=session)
+    if record_fetched:
+        to_updates = []
+        for msg in messages:
+            to_update = {'msg_id': msg['msg_id'],
+                         'request_id': msg['request_id'],
+                         'poll_period': datetime.timedelta(seconds=delay),
+                         'status': record_fetched_status}
+            to_updates.append(to_update)
+        if to_updates:
+            orm_messages.update_messages(to_updates, min_request_id=min_request_id, session=session)
+    return messages
 
 
 @read_session
@@ -84,8 +100,9 @@ def retrieve_request_messages(request_id, bulk_size=1, session=None):
 
 
 @read_session
-def retrieve_transform_messages(transform_id, bulk_size=1, session=None):
-    return retrieve_messages(transform_id=transform_id,
+def retrieve_transform_messages(request_id, transform_id, bulk_size=1, session=None):
+    return retrieve_messages(request_id=request_id,
+                             transform_id=transform_id,
                              msg_type=MessageType.IDDSCommunication,
                              status=MessageStatus.New,
                              bulk_size=bulk_size,
@@ -94,8 +111,9 @@ def retrieve_transform_messages(transform_id, bulk_size=1, session=None):
 
 
 @read_session
-def retrieve_processing_messages(processing_id, bulk_size=1, session=None):
-    return retrieve_messages(processing_id=processing_id,
+def retrieve_processing_messages(request_id, processing_id, bulk_size=1, session=None):
+    return retrieve_messages(request_id=request_id,
+                             processing_id=processing_id,
                              msg_type=MessageType.IDDSCommunication,
                              status=MessageStatus.New,
                              bulk_size=bulk_size,
@@ -114,13 +132,13 @@ def delete_messages(messages, session=None):
 
 
 @transactional_session
-def update_messages(messages, session=None):
+def update_messages(messages, min_request_id=None, session=None):
     """
     Update all messages status with the given IDs.
 
     :param messages: The messages to be updated as a list of dictionaries.
     """
-    return orm_messages.update_messages(messages=messages, session=session)
+    return orm_messages.update_messages(messages=messages, min_request_id=min_request_id, session=session)
 
 
 @transactional_session

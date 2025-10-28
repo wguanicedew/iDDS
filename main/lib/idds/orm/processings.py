@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2020
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2025
 
 
 """
@@ -16,20 +16,23 @@ operations related to Processings.
 import datetime
 
 import sqlalchemy
-from sqlalchemy import func
+from sqlalchemy import func, select, not_
 from sqlalchemy.exc import DatabaseError, IntegrityError
 from sqlalchemy.sql.expression import asc
 
 from idds.common import exceptions
-from idds.common.constants import ProcessingStatus, ProcessingLocking, GranularityType
-from idds.orm.base.session import read_session, transactional_session
+from idds.common.constants import CommandType, ProcessingType, ProcessingStatus, ProcessingLocking, GranularityType
+from idds.common.utils import get_process_thread_info
+from idds.orm.base.session import read_session, transactional_session, safe_bulk_update_mappings
 from idds.orm.base import models
 
 
 def create_processing(request_id, workload_id, transform_id, status=ProcessingStatus.New, locking=ProcessingLocking.Idle, submitter=None,
                       granularity=None, granularity_type=GranularityType.File, expired_at=None, processing_metadata=None,
-                      new_poll_period=1, update_poll_period=10,
+                      new_poll_period=1, update_poll_period=10, processing_type=ProcessingType.Workflow,
                       new_retries=0, update_retries=0, max_new_retries=3, max_update_retries=0,
+                      command=CommandType.NoneCommand,
+                      internal_id=None, parent_internal_id=None, loop_index=None,
                       substatus=ProcessingStatus.New, output_metadata=None):
     """
     Create a processing.
@@ -52,6 +55,9 @@ def create_processing(request_id, workload_id, transform_id, status=ProcessingSt
                                        submitter=submitter, granularity=granularity, granularity_type=granularity_type,
                                        expired_at=expired_at, processing_metadata=processing_metadata,
                                        new_retries=new_retries, update_retries=update_retries,
+                                       processing_type=processing_type, command=command,
+                                       internal_id=internal_id, parent_internal_id=parent_internal_id,
+                                       loop_index=loop_index,
                                        max_new_retries=max_new_retries, max_update_retries=max_update_retries,
                                        output_metadata=output_metadata)
 
@@ -69,6 +75,9 @@ def add_processing(request_id, workload_id, transform_id, status=ProcessingStatu
                    locking=ProcessingLocking.Idle, submitter=None, substatus=ProcessingStatus.New,
                    granularity=None, granularity_type=GranularityType.File, expired_at=None,
                    processing_metadata=None, new_poll_period=1, update_poll_period=10,
+                   processing_type=ProcessingType.Workflow,
+                   command=CommandType.NoneCommand,
+                   internal_id=None, parent_internal_id=None, loop_index=None,
                    new_retries=0, update_retries=0, max_new_retries=3, max_update_retries=0,
                    output_metadata=None, session=None):
     """
@@ -95,8 +104,11 @@ def add_processing(request_id, workload_id, transform_id, status=ProcessingStatu
                                            status=status, substatus=substatus, locking=locking, submitter=submitter,
                                            granularity=granularity, granularity_type=granularity_type,
                                            expired_at=expired_at, new_poll_period=new_poll_period,
-                                           update_poll_period=update_poll_period,
+                                           update_poll_period=update_poll_period, processing_type=processing_type,
                                            new_retries=new_retries, update_retries=update_retries,
+                                           command=command,
+                                           internal_id=internal_id, parent_internal_id=parent_internal_id,
+                                           loop_index=loop_index,
                                            max_new_retries=max_new_retries, max_update_retries=max_update_retries,
                                            processing_metadata=processing_metadata, output_metadata=output_metadata)
         new_processing.save(session=session)
@@ -109,7 +121,7 @@ def add_processing(request_id, workload_id, transform_id, status=ProcessingStatu
 
 
 @read_session
-def get_processing(processing_id, to_json=False, session=None):
+def get_processing(processing_id, request_id=None, transform_id=None, to_json=False, session=None):
     """
     Get processing or raise a NoObject exception.
 
@@ -126,6 +138,11 @@ def get_processing(processing_id, to_json=False, session=None):
     try:
         query = session.query(models.Processing)\
                        .filter_by(processing_id=processing_id)
+        if request_id is not None:
+            query = query.filter_by(request_id=request_id)
+        if transform_id is not None:
+            query = query.filter_by(transform_id=transform_id)
+
         ret = query.first()
         if not ret:
             return None
@@ -142,7 +159,7 @@ def get_processing(processing_id, to_json=False, session=None):
 
 
 @read_session
-def get_processing_by_id_status(processing_id, status=None, locking=False, session=None):
+def get_processing_by_id_status(processing_id, status=None, exclude_status=None, locking=False, to_lock=False, session=None):
     """
     Get a processing or raise a NoObject exception.
 
@@ -158,31 +175,47 @@ def get_processing_by_id_status(processing_id, status=None, locking=False, sessi
     """
 
     try:
-        query = session.query(models.Processing)\
-                       .filter(models.Processing.processing_id == processing_id)
+        query = select(models.Processing).filter(models.Processing.processing_id == processing_id)
 
         if status:
             if not isinstance(status, (list, tuple)):
                 status = [status]
             if len(status) == 1:
                 status = [status[0], status[0]]
-            query = query.filter(models.Processing.status.in_(status))
+            query = query.where(models.Processing.status.in_(status))
+
+        if exclude_status:
+            if not isinstance(exclude_status, (list, tuple)):
+                exclude_status = [exclude_status]
+            if len(exclude_status) == 1:
+                exclude_status = [exclude_status[0], exclude_status[0]]
+            query = query.where(not_(models.Processing.status.in_(exclude_status)))
 
         if locking:
-            query = query.filter(models.Processing.locking == ProcessingLocking.Idle)
+            query = query.where(models.Processing.locking == ProcessingLocking.Idle)
             query = query.with_for_update(skip_locked=True)
 
-        ret = query.first()
+        ret = session.execute(query).fetchone()
         if not ret:
             return None
         else:
-            return ret.to_dict()
+            if locking:
+                ret[0].updated_at = datetime.datetime.utcnow()
+                ret[0].locking = ProcessingLocking.Locking
+                hostname, pid, thread_id, thread_name = get_process_thread_info()
+                ret[0].locking_hostname = hostname
+                ret[0].locking_pid = pid
+                ret[0].locking_thread_id = thread_id
+                ret[0].locking_thread_name = thread_name
+
+            return ret[0].to_dict()
     except sqlalchemy.orm.exc.NoResultFound as error:
         raise exceptions.NoObject('processing processing_id: %s cannot be found: %s' % (processing_id, error))
 
 
 @read_session
-def get_processings(request_id=None, workload_id=None, transform_id=None, to_json=False, session=None):
+def get_processings(request_id=None, workload_id=None, transform_id=None, loop_index=None, internal_ids=None,
+                    parent_internal_ids=None, to_json=False, session=None):
     """
     Get processing or raise a NoObject exception.
 
@@ -205,6 +238,20 @@ def get_processings(request_id=None, workload_id=None, transform_id=None, to_jso
             query = query.filter(models.Processing.workload_id == workload_id)
         if transform_id:
             query = query.filter(models.Processing.transform_id == transform_id)
+        if loop_index is not None:
+            query = query.filter(models.Processing.loop_index == loop_index)
+        if internal_ids:
+            if not isinstance(internal_ids, (list, tuple)):
+                internal_ids = [internal_ids]
+            if len(internal_ids) == 1:
+                internal_ids = [internal_ids[0], internal_ids[0]]
+            query = query.filter(models.Processing.internal_id.in_(internal_ids))
+        if parent_internal_ids:
+            if not isinstance(parent_internal_ids, (list, tuple)):
+                parent_internal_ids = [parent_internal_ids]
+            if len(parent_internal_ids) == 1:
+                parent_internal_ids = [parent_internal_ids[0], parent_internal_ids[0]]
+            query = query.filter(models.Processing.parent_internal_id.in_(parent_internal_ids))
 
         tmp = query.all()
         rets = []
@@ -261,7 +308,7 @@ def get_processings_by_transform_id(transform_id=None, to_json=False, session=No
 @transactional_session
 def get_processings_by_status(status, period=None, processing_ids=[], locking=False, locking_for_update=False,
                               bulk_size=None, submitter=None, to_json=False, by_substatus=False, only_return_id=False,
-                              new_poll=False, update_poll=False, for_poller=False, session=None):
+                              not_lock=False, min_request_id=None, new_poll=False, update_poll=False, for_poller=False, session=None):
     """
     Get processing or raise a NoObject exception.
 
@@ -303,6 +350,8 @@ def get_processings_by_status(status, period=None, processing_ids=[], locking=Fa
 
         if processing_ids:
             query = query.filter(models.Processing.processing_id.in_(processing_ids))
+        if min_request_id:
+            query = query.filter(models.Processing.request_id >= min_request_id)
         # if period:
         #     query = query.filter(models.Processing.updated_at < datetime.datetime.utcnow() - datetime.timedelta(seconds=period))
         if locking:
@@ -324,6 +373,16 @@ def get_processings_by_status(status, period=None, processing_ids=[], locking=Fa
         rets = []
         if tmp:
             for t in tmp:
+                if locking:
+                    t.updated_at = datetime.datetime.utcnow()
+                    t.locking = ProcessingLocking.Locking
+
+                    hostname, pid, thread_id, thread_name = get_process_thread_info()
+                    t.locking_hostname = hostname
+                    t.locking_pid = pid
+                    t.locking_thread_id = thread_id
+                    t.locking_thread_name = thread_name
+
                 if only_return_id:
                     rets.append(t[0])
                 else:
@@ -339,7 +398,7 @@ def get_processings_by_status(status, period=None, processing_ids=[], locking=Fa
 
 
 @transactional_session
-def update_processing(processing_id, parameters, session=None):
+def update_processing(processing_id, parameters, locking=False, session=None):
     """
     update a processing.
 
@@ -374,10 +433,65 @@ def update_processing(processing_id, parameters, session=None):
             parameters['_running_metadata'] = parameters['running_metadata']
             del parameters['running_metadata']
 
-        session.query(models.Processing).filter_by(processing_id=processing_id)\
-               .update(parameters, synchronize_session=False)
+        query = session.query(models.Processing).filter_by(processing_id=processing_id)
+        if locking:
+            query = query.filter(models.Processing.locking == ProcessingLocking.Idle)
+            query = query.with_for_update(skip_locked=True)
+        row = query.one_or_none()
+        if not row:
+            return 0
+
+        # apply updates
+        for k, v in parameters.items():
+            setattr(row, k, v)
+
+        return 1
     except sqlalchemy.orm.exc.NoResultFound as error:
         raise exceptions.NoObject('Processing %s cannot be found: %s' % (processing_id, error))
+    return 0
+
+
+@transactional_session
+def abort_resume_processings(transform_id=None, request_id=None, processing_id=None, abort=False, resume=False, session=None):
+    """
+    abort/resume processings.
+
+    :param request_id: The request id.
+    :param transform_id: The id of the transform.
+    :param session: The database session in use.
+
+    :raises NoObject: If no content is founded.
+    :raises DatabaseException: If there is a database error.
+    """
+    if not abort and not resume:
+        return
+    if not transform_id and not request_id and not processing_id:
+        return
+
+    try:
+        if abort:
+            # parameters = {'substatus': ProcessingStatus.ToCancel}
+            parameters = {'command': CommandType.AbortProcessing}
+            command = CommandType.AbortProcessing
+        if resume:
+            command = CommandType.ResumeProcessing
+            # parameters = {'status': ProcessingStatus.ToResume,
+            #               'substatus': ProcessingStatus.ToResume}
+            parameters = {'status': ProcessingStatus.ToResume, 'command': CommandType.ResumeProcessing}
+
+        query = session.query(models.Processing)
+        if processing_id:
+            query = query.filter_by(processing_id=processing_id)
+        if transform_id:
+            query = query.filter_by(transform_id=transform_id)
+        if request_id:
+            query = query.filter_by(request_id=request_id)
+        query = query.filter(models.Processing.command != command)
+        num_rows = query.update(parameters, synchronize_session=False)
+        return num_rows
+    except sqlalchemy.orm.exc.NoResultFound as error:
+        raise exceptions.NoObject('Transfrom %s cannot be found: %s' % (transform_id, error))
+    return 0
 
 
 @transactional_session
@@ -398,16 +512,48 @@ def delete_processing(processing_id=None, session=None):
 
 
 @transactional_session
-def clean_locking(time_period=3600, session=None):
+def clean_locking(time_period=3600, min_request_id=None, health_items=[], force=False, hostname=None, pid=None, session=None):
     """
     Clearn locking which is older than time period.
 
     :param time_period in seconds
     """
-    params = {'locking': 0}
-    session.query(models.Processing).filter(models.Processing.locking == ProcessingLocking.Locking)\
-           .filter(models.Processing.updated_at < datetime.datetime.utcnow() - datetime.timedelta(seconds=time_period))\
-           .update(params, synchronize_session=False)
+    health_dict = {}
+    for item in health_items:
+        hostname = item['hostname']
+        pid = item['pid']
+        thread_id = item['thread_id']
+        if hostname not in health_dict:
+            health_dict[hostname] = {}
+        if pid not in health_dict[hostname]:
+            health_dict[hostname][pid] = []
+        if thread_id not in health_dict[hostname][pid]:
+            health_dict[hostname][pid].append(thread_id)
+    query = session.query(models.Processing.processing_id,
+                          models.Processing.locking_hostname,
+                          models.Processing.locking_pid,
+                          models.Processing.locking_thread_id,
+                          models.Processing.locking_thread_name,
+                          models.Processing.updated_at)
+    query = query.filter(models.Processing.locking == ProcessingLocking.Locking)
+    if min_request_id:
+        query = query.filter(models.Processing.request_id >= min_request_id)
+
+    lost_processing_ids = []
+    tmp = query.all()
+    if tmp:
+        for req in tmp:
+            pr_id, locking_hostname, locking_pid, locking_thread_id, locking_thread_name, updated_at = req
+            if (
+                (locking_hostname not in health_dict or locking_pid not in health_dict[locking_hostname])
+                or (force and hostname == locking_hostname and pid == locking_pid)        # noqa W503
+                or (updated_at < datetime.datetime.utcnow() - datetime.timedelta(seconds=time_period))    # noqa W503
+            ):
+                lost_processing_ids.append({"processing_id": pr_id, 'locking': 0})
+
+    # This one can cause dead locks
+    # session.bulk_update_mappings(models.Processing, lost_processing_ids)
+    safe_bulk_update_mappings(session, models.Processing, lost_processing_ids)
 
 
 @transactional_session

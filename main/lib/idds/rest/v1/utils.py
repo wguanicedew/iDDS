@@ -6,11 +6,15 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2020
+# - Wen Guan, <wen.guan@cern.ch>, 2020 - 2025
 
 import copy
+import json
+import os
+import traceback
 
-from idds.common.constants import RequestType, RequestStatus
+from idds.common.constants import RequestType, RequestStatus, Sections
+from idds.common.config import config_has_section, config_has_option, config_get, config_get_int
 from idds.common.utils import is_new_version
 
 from idds.workflow.work import Collection, Processing
@@ -174,3 +178,87 @@ def convert_old_request_metadata(req):
         req['request_metadata'] = wf
         return req
     return req
+
+
+def get_additional_request_data_storage(data, workflow, logger):
+    try:
+        if config_has_section(Sections.Rest) and config_has_option(Sections.Rest, 'max_request_data_length'):
+            max_request_data_length = config_get_int(Sections.Rest, 'max_request_data_length')
+        else:
+            max_request_data_length = 10000000
+
+        if config_has_section(Sections.Rest) and config_has_option(Sections.Rest, 'additional_storage'):
+            additional_storage = config_get(Sections.Rest, 'additional_storage')
+        else:
+            additional_storage = '/tmp'
+
+        if workflow and (workflow.is_with_steps() or workflow.is_workflow_step):
+            return False, additional_storage
+
+        data_length = len(data)
+        logger.info(f"max_request_data_length: {max_request_data_length}, len(data): {data_length}")
+        if data_length > max_request_data_length:
+            return True, additional_storage
+        return False, additional_storage
+    except Exception as ex:
+        logger.warning(f"get_additional_request_data_storage raise exception: {ex}: {traceback.format_exc()}")
+    return False, None
+
+
+def convert_data_to_use_additional_storage(data, additional_data_storage, with_add_storage, logger):
+    if not data:
+        return data
+
+    if ('request_metadata' in data and isinstance(data['request_metadata'], dict) and data['request_metadata'].get('workflow')):
+        workflow = data['request_metadata']['workflow']
+        if with_add_storage:
+            internal_id = workflow.get_internal_id()
+            storage = os.path.join(additional_data_storage, internal_id)
+            if not os.path.exists(storage):
+                os.makedirs(storage, exist_ok=True)
+
+            data['additional_data_storage'] = storage
+            workflow.set_additional_data_storage(storage)
+            workflow.convert_data_to_additional_data_storage(storage)
+            data['request_metadata']['workflow'] = workflow
+            logger.info(f"Converted workflow {workflow.name} to use storage {storage}")
+        elif workflow.is_with_steps():
+            wf_storage = workflow.get_additional_data_storage()
+            logger.info(f"Workflow {workflow.name} has steps with additional storage {wf_storage}")
+            if wf_storage == "IDDS_WORKFLOW_ADDITIONAL_STORAGE":
+                internal_id = workflow.get_internal_id()
+                storage = os.path.join(additional_data_storage, internal_id)
+
+                # convert IDDS_WORKFLOW_ADDITIONAL_STORAGE to additional_data_storage
+                workflow.convert_data_to_additional_data_storage(storage, storage_name=wf_storage, replace_storage_name=True)
+                logger.info(f"Replaced workflow {workflow.name} {wf_storage} with {storage}")
+    return data
+
+
+def store_data_to_use_additional_storage(internal_id, data, additional_data_storage, logger):
+    data_storage = os.path.join(additional_data_storage, internal_id)
+    if not os.path.exists(data_storage):
+        os.makedirs(data_storage, exist_ok=True)
+
+    for work_name, work_data in data.items():
+        data_file = os.path.join(data_storage, work_name)
+        with open(data_file, 'w') as fd:
+            json.dump(work_data, fd)
+        logger.info(f"store data of {work_name} to {data_file}")
+
+
+def get_workflow_item(data, item_name, logger):
+    try:
+        if not data:
+            return None
+
+        request_metadata = data.get('request_metadata', {})
+        if 'workflow' in request_metadata:
+            workflow = request_metadata.get('workflow')
+        elif 'build_workflow' in request_metadata:
+            workflow = request_metadata.get('build_workflow')
+
+        if workflow:
+            return getattr(workflow, item_name, None)()
+    except Exception as ex:
+        logger.warning(f"failed to get workflow item {item_name}: {ex}")

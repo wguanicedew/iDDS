@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2020 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2020 - 2025
 
 import copy
 import datetime
@@ -67,6 +67,8 @@ class Collection(Base):
         self.total_files = 0
         self.processed_files = 0
         self.processing_files = 0
+        self.activated_files = 0
+        self.preprocessing_files = 0
         self.bytes = 0
         self.new_files = 0
         self.failed_files = 0
@@ -151,6 +153,8 @@ class Collection(Base):
             self.total_files = self._collection['total_files']
             self.processed_files = self._collection['processed_files']
             self.processing_files = self._collection['processing_files']
+            self.activated_files = self._collection.get('activated_files', 0)
+            self.preprocessing_files = self._collection.get('preprocessing_files', 0)
             self.bytes = self._collection['bytes']
 
     def to_origin_dict(self):
@@ -439,7 +443,7 @@ class Work(Base):
                  primary_input_collection=None, other_input_collections=None, input_collections=None,
                  primary_output_collection=None, other_output_collections=None, output_collections=None,
                  log_collections=None, release_inputs_after_submitting=False, username=None,
-                 agent_attributes=None, is_template=False,
+                 agent_attributes=None, is_template=False, loading=False,
                  logger=None):
         """
         Init a work/task/transformation.
@@ -465,7 +469,7 @@ class Work(Base):
 
         self._processings = {}
 
-        super(Work, self).__init__()
+        super(Work, self).__init__(loading=loading)
 
         self.internal_id = str(uuid.uuid4())[:8]
         self.template_work_id = self.internal_id
@@ -592,6 +596,8 @@ class Work(Base):
 
         self.func_site_to_cloud = None
 
+        self.dispatch_ext_content = False
+
         """
         self._running_data_names = []
         for name in ['internal_id', 'template_work_id', 'initialized', 'sequence_id', 'parameters', 'work_id', 'transforming', 'workdir',
@@ -622,6 +628,18 @@ class Work(Base):
     def get_sequence_id(self):
         return self.sequence_id
 
+    def get_site(self):
+        return None
+
+    def get_cloud(self):
+        return None
+
+    def get_queue(self):
+        return None
+
+    def is_data_work(self):
+        return False
+
     @property
     def internal_id(self):
         return self.get_metadata_item('internal_id')
@@ -629,6 +647,22 @@ class Work(Base):
     @internal_id.setter
     def internal_id(self, value):
         self.add_metadata_item('internal_id', value)
+
+    @property
+    def parent_internal_id(self):
+        return self.get_metadata_item('parent_internal_id')
+
+    @parent_internal_id.setter
+    def parent_internal_id(self, value):
+        self.add_metadata_item('parent_internal_id', value)
+
+    @property
+    def parent_internal_ids(self):
+        return self.get_metadata_item('parent_internal_ids', None)
+
+    @parent_internal_ids.setter
+    def parent_internal_ids(self, value):
+        self.add_metadata_item('parent_internal_ids', value)
 
     @property
     def template_work_id(self):
@@ -672,6 +706,24 @@ class Work(Base):
     @sequence_id.setter
     def sequence_id(self, value):
         self.add_metadata_item('sequence_id', value)
+
+    @property
+    def num_inputs(self):
+        num = self.get_metadata_item('num_inputs', None)
+        return num
+
+    @num_inputs.setter
+    def num_inputs(self, value):
+        self.add_metadata_item('num_inputs', value)
+
+    @property
+    def has_unmapped_jobs(self):
+        value = self.get_metadata_item('has_unmapped_jobs', True)
+        return value
+
+    @has_unmapped_jobs.setter
+    def has_unmapped_jobs(self, value):
+        self.add_metadata_item('has_unmapped_jobs', value)
 
     @property
     def parameters(self):
@@ -1044,6 +1096,9 @@ class Work(Base):
                     if "___idds___" not in coll.name:
                         coll.name = coll.name + "." + str(value)
 
+    def get_loop_index(self):
+        return self.num_run
+
     @property
     def primary_input_collection(self):
         if self._primary_input_collection:
@@ -1389,6 +1444,9 @@ class Work(Base):
     def get_arguments(self):
         return self.arguments
 
+    def convert_data_to_additional_data_storage(self, storage, storage_name=None, replace_storage_name=False):
+        pass
+
     def get_ancestry_works(self):
         return []
 
@@ -1463,6 +1521,14 @@ class Work(Base):
         *** Function called by Transformer agent.
         """
         if self.status in [WorkStatus.SubFinished] and self.substatus not in [WorkStatus.ToCancel, WorkStatus.ToSuspend, WorkStatus.ToResume]:
+            return True
+        return False
+
+    def is_processed(self, synchronize=True):
+        """
+        *** Function called by Transformer agent.
+        """
+        if self.status in [WorkStatus.Finished, WorkStatus.SubFinished] and self.substatus not in [WorkStatus.ToCancel, WorkStatus.ToSuspend, WorkStatus.ToResume]:
             return True
         return False
 

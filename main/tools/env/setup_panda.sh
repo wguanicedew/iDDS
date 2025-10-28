@@ -27,7 +27,39 @@ if [ "$instance" == "k8s" ]; then
     export PANDA_SYS=/afs/cern.ch/user/w/wguan/workdisk/iDDS/.conda/iDDS/
     # export PANDA_CONFIG_ROOT=/afs/cern.ch/user/w/wguan/workdisk/iDDS/main/etc/panda/
     export PANDA_CONFIG_ROOT=~/.panda/
-elif [ "$instance" == "slac" ]; then
+elif [ "$instance" == "bnl" ]; then
+    export PANDA_AUTH=oidc
+
+    export PANDA_URL_SSL=https://pandaserver01.sdcc.bnl.gov:25443/server/panda
+    export PANDA_URL=https://pandaserver01.sdcc.bnl.gov:25443/server/panda
+    export PANDACACHE_URL=https://pandaserver01.sdcc.bnl.gov:25443/server/panda
+    export PANDAMON_URL=https://pandamon01.sdcc.bnl.gov
+    export PANDA_AUTH=oidc
+    export PANDA_AUTH_VO=EIC
+    export PANDA_AUTH_VO=panda_dev.production
+    export PANDA_USE_NATIVE_HTTPLIB=1
+    export PANDA_BEHIND_REAL_LB=1
+
+    # export PANDA_AUTH_VO=panda_dev
+    # export PANDA_AUTH_VO=Rubin:production
+
+    export PANDACACHE_URL=$PANDA_URL_SSL
+    export PANDA_SYS=/afs/cern.ch/user/w/wguan/workdisk/iDDS/.conda/iDDS/
+
+    export PANDA_BEHIND_REAL_LB=true
+    export PANDA_VERIFY_HOST=off
+    export PANDA_CONFIG_ROOT=~/.panda/
+
+    unset IDDS_HOST
+    # doma
+    # export IDDS_HOST=https://aipanda105.cern.ch:443/idds
+
+    # bnl rucio
+    source /cvmfs/eic.opensciencegrid.org/rucio-clients/alrb_setup.sh
+    voms-proxy-init
+    export RUCIO_ACCOUNT=wguan
+
+elif [ "$instance" == "usdf_dev" ]; then
     export PANDA_AUTH=oidc
     export PANDA_BEHIND_REAL_LB=true
     export PANDA_VERIFY_HOST=off
@@ -36,11 +68,17 @@ elif [ "$instance" == "slac" ]; then
     export PANDAMON_URL=https://rubin-panda-bigmon-dev.slac.stanford.edu
     export PANDA_AUTH_VO=Rubin
 
+    # export PANDA_AUTH_VO=Rubin.production
+
+    export IDDS_HOST=https://rubin-panda-idds-dev.slac.stanford.edu:8443/idds
+
     export PANDACACHE_URL=$PANDA_URL_SSL
     export PANDA_SYS=/afs/cern.ch/user/w/wguan/workdisk/iDDS/.conda/iDDS/
 
     # export PANDA_CONFIG_ROOT=/afs/cern.ch/user/w/wguan/workdisk/iDDS/main/etc/panda/
     export PANDA_CONFIG_ROOT=~/.panda/
+
+    export IDDS_OIDC_TOKEN_FILE=~/.idds/.token_rubin_dev
 elif [ "$instance" == "usdf" ]; then
     export PANDA_AUTH=oidc
     export PANDA_BEHIND_REAL_LB=true
@@ -49,16 +87,77 @@ elif [ "$instance" == "usdf" ]; then
     export PANDA_URL=https://usdf-panda-server.slac.stanford.edu:8443/server/panda
     export PANDACACHE_URL=$PANDA_URL_SSL
     export PANDAMON_URL=https://usdf-panda-bigmon.slac.stanford.edu:8443/
-    export PANDA_AUTH_VO=Rubin
+    export PANDA_AUTH_VO=Rubin.production
+
+    export PANDACACHE_URL=$PANDA_URL_SSL
+    export PANDA_SYS=/afs/cern.ch/user/w/wguan/workdisk/iDDS/.conda/iDDS/
+
+    export IDDS_HOST=https://usdf-panda-idds.slac.stanford.edu:8443/idds
+
+    # export PANDA_CONFIG_ROOT=/afs/cern.ch/user/w/wguan/workdisk/iDDS/main/etc/panda/
+    export PANDA_CONFIG_ROOT=~/.panda/
+    export IDDS_OIDC_TOKEN_FILE=~/.idds/.token_rubin_prod
+elif [ "$instance" == "new" ]; then
+    export PANDA_AUTH=oidc
+    export PANDA_URL_SSL=https://ai-idds-05.cern.ch:25443/server/panda
+    export PANDA_URL=http://ai-idds-05.cern.ch:25080/server/panda
+    export PANDAMON_URL=https://panda-doma.cern.ch
+    # export PANDA_AUTH_VO=panda_dev
+    export PANDA_AUTH_VO=Rubin:production
+
+    export PANDACACHE_URL=$PANDA_URL_SSL
+
+    export PANDA_SYS=/afs/cern.ch/user/w/wguan/workdisk/iDDS/.conda/iDDS/
+    # export PANDA_CONFIG_ROOT=/afs/cern.ch/user/w/wguan/workdisk/iDDS/main/etc/panda/
+    export PANDA_CONFIG_ROOT=~/.panda/
+
+    # export IDDS_HOST=https://aipanda015.cern.ch:443/idds
+
+    # dev
+    # export IDDS_HOST=https://aipanda104.cern.ch:443/idds
+
+    # doma
+    export IDDS_HOST=https://aipanda105.cern.ch:443/idds
+
+    # export IDDS_BROKERS=atlas-test-mb.cern.ch:61013
+    # export IDDS_BROKER_DESTINATION=/topic/doma.idds
+    # export IDDS_BROKER_USERNAME=domaidds
+    # export IDDS_BROKER_PASSWORD=1d25yeft6krJ1HFH
+    # export IDDS_BROKER_TIMEOUT=360
+
+    PANDA_QUEUE=BNL_OSG_2
+    PANDA_WORKING_GROUP=EIC
+    PANDA_VO=wlcg
+elif [ "$instance" == "doma_k8s" ]; then
+    # export PANDA_URL_SSL=https://panda-doma-k8s-panda.cern.ch/server/panda
+    # export PANDA_URL=http://panda-doma-k8s-panda.cern.ch:25080/server/panda
+    # export PANDACACHE_URL=https://panda-doma-k8s-panda.cern.ch/server/panda
+    # export PANDAMON_URL=https://panda-doma-bigmon.cern.ch
+    export PANDA_URL_SSL=https://pandaserver-doma.cern.ch/server/panda
+    export PANDA_URL=http://pandaserver-doma.cern.ch:25080/server/panda
+    export PANDACACHE_URL=https://pandaserver-doma.cern.ch/server/panda
+    export PANDAMON_URL=https://panda-doma.cern.ch
+    
+    export PANDA_AUTH=oidc
+    export PANDA_AUTH_VO=Rubin.production
+    # export PANDA_AUTH_VO=EIC
+    # export PANDA_AUTH_VO=Rubin
+    export PANDA_USE_NATIVE_HTTPLIB=1
+    export PANDA_BEHIND_REAL_LB=true
+
+    # export PANDA_AUTH_VO=Rubin.production
 
     export PANDACACHE_URL=$PANDA_URL_SSL
     export PANDA_SYS=/afs/cern.ch/user/w/wguan/workdisk/iDDS/.conda/iDDS/
 
     # export PANDA_CONFIG_ROOT=/afs/cern.ch/user/w/wguan/workdisk/iDDS/main/etc/panda/
     export PANDA_CONFIG_ROOT=~/.panda/
+
+    export IDDS_OIDC_TOKEN_FILE=~/.idds/.token_doma_k8s
 else
     export PANDA_AUTH=oidc
-    export PANDA_URL_SSL=https://pandaserver-doma.cern.ch:25443/server/panda
+    # export PANDA_URL_SSL=https://pandaserver-doma.cern.ch:25443/server/panda
+    export PANDA_URL_SSL=https://pandaserver-doma.cern.ch:443/server/panda
     export PANDA_URL=http://pandaserver-doma.cern.ch:25080/server/panda
     export PANDAMON_URL=https://panda-doma.cern.ch
     # export PANDA_AUTH_VO=panda_dev
@@ -69,4 +168,22 @@ else
     export PANDA_SYS=/afs/cern.ch/user/w/wguan/workdisk/iDDS/.conda/iDDS/
     # export PANDA_CONFIG_ROOT=/afs/cern.ch/user/w/wguan/workdisk/iDDS/main/etc/panda/
     export PANDA_CONFIG_ROOT=~/.panda/
+
+    # export IDDS_HOST=https://aipanda015.cern.ch:443/idds
+   
+    # dev
+    # export IDDS_HOST=https://aipanda104.cern.ch:443/idds
+
+    # doma
+    # export IDDS_HOST=https://aipanda105.cern.ch:443/idds
+
+    # export IDDS_BROKERS=atlas-test-mb.cern.ch:61013
+    # export IDDS_BROKER_DESTINATION=/topic/doma.idds
+    # export IDDS_BROKER_USERNAME=domaidds
+    # export IDDS_BROKER_PASSWORD=1d25yeft6krJ1HFH
+    # export IDDS_BROKER_TIMEOUT=360
+
+    PANDA_QUEUE=BNL_OSG_2
+    PANDA_WORKING_GROUP=EIC
+    PANDA_VO=wlcg
 fi

@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2024
 
 
 """
@@ -14,17 +14,19 @@ operations related to Requests.
 """
 
 import copy
-import datetime
 
 from idds.common.constants import (RequestStatus, RequestLocking, WorkStatus,
                                    CollectionType, CollectionStatus, CollectionRelationType,
-                                   MessageStatus)
+                                   MessageStatus, MetaStatus, CommandType)
 from idds.orm.base.session import read_session, transactional_session
+from idds.orm import requests_group as orm_requests_group
 from idds.orm import requests as orm_requests
 from idds.orm import transforms as orm_transforms
 from idds.orm import workprogress as orm_workprogresses
 from idds.orm import collections as orm_collections
+from idds.orm import conditions as orm_conditions
 from idds.orm import messages as orm_messages
+from idds.orm import meta as orm_meta
 from idds.core import messages as core_messages
 
 
@@ -32,8 +34,11 @@ def create_request(scope=None, name=None, requester=None, request_type=None,
                    username=None, userdn=None, transform_tag=None,
                    status=RequestStatus.New, locking=RequestLocking.Idle, priority=0,
                    lifetime=None, workload_id=None, request_metadata=None,
-                   new_poll_period=1, update_poll_period=10,
+                   new_poll_period=1, update_poll_period=10, site=None,
+                   cloud=None, queue=None, command=CommandType.NoneCommand,
                    new_retries=0, update_retries=0, max_new_retries=3, max_update_retries=0,
+                   campaign=None, campaign_group=None, campaign_tag=None,
+                   max_processing_requests=-1, additional_data_storage=None,
                    processing_metadata=None):
     """
     Add a request.
@@ -58,12 +63,15 @@ def create_request(scope=None, name=None, requester=None, request_type=None,
 
     # request_metadata = convert_request_metadata_to_workflow(scope, name, workload_id, request_type, request_metadata)
     kwargs = {'scope': scope, 'name': name, 'requester': requester, 'request_type': request_type,
-              'username': username, 'userdn': userdn,
+              'username': username, 'userdn': userdn, 'command': command,
               'transform_tag': transform_tag, 'status': status, 'locking': locking,
               'priority': priority, 'lifetime': lifetime, 'workload_id': workload_id,
               'new_poll_period': new_poll_period, 'update_poll_period': update_poll_period,
               'new_retries': new_retries, 'update_retries': update_retries,
               'max_new_retries': max_new_retries, 'max_update_retries': max_update_retries,
+              'site': site, 'campaign': campaign, 'campaign_group': campaign_group,
+              'cloud': cloud, 'queue': queue, 'max_processing_requests': max_processing_requests,
+              'campaign_tag': campaign_tag, 'additional_data_storage': additional_data_storage,
               'request_metadata': request_metadata, 'processing_metadata': processing_metadata}
     return orm_requests.create_request(**kwargs)
 
@@ -73,8 +81,11 @@ def add_request(scope=None, name=None, requester=None, request_type=None,
                 username=None, userdn=None, transform_tag=None,
                 status=RequestStatus.New, locking=RequestLocking.Idle, priority=0,
                 lifetime=None, workload_id=None, request_metadata=None,
-                new_poll_period=1, update_poll_period=10,
+                new_poll_period=1, update_poll_period=10, site=None,
+                cloud=None, queue=None, command=CommandType.NoneCommand,
                 new_retries=0, update_retries=0, max_new_retries=3, max_update_retries=0,
+                campaign=None, campaign_scope=None, campaign_group=None, campaign_tag=None,
+                additional_data_storage=None, max_processing_requests=-1,
                 processing_metadata=None, session=None):
     """
     Add a request.
@@ -97,14 +108,42 @@ def add_request(scope=None, name=None, requester=None, request_type=None,
     if workload_id is None and request_metadata and 'workload_id' in request_metadata and request_metadata['workload_id']:
         workload_id = int(request_metadata['workload_id'])
     # request_metadata = convert_request_metadata_to_workflow(scope, name, workload_id, request_type, request_metadata)
+    if not site:
+        try:
+            if request_metadata and 'workflow' in request_metadata and request_metadata['workflow']:
+                w = request_metadata['workflow']
+                site = w.get_site()
+        except Exception:
+            pass
+
+    group_id = None
+    if campaign and campaign_scope and campaign_group and campaign_tag:
+        req_groups = orm_requests_group.get_request_groups(campaign=campaign, campaign_scope=campaign_scope,
+                                                           campaign_group=campaign_group, campaign_tag=campaign_tag,
+                                                           session=session)
+        if req_groups:
+            if len(req_groups) == 1:
+                group_id = req_groups[0]["group_id"]
+        else:
+            group_id = orm_requests_group.add_request_group(campaign=campaign, campaign_scope=campaign_scope,
+                                                            campaign_group=campaign_group, campaign_tag=campaign_tag,
+                                                            requester=requester, username=username, userdn=userdn,
+                                                            lifetime=lifetime, max_new_retries=max_new_retries,
+                                                            max_update_retries=max_update_retries,
+                                                            max_processing_requests=max_processing_requests,
+                                                            session=session)
 
     kwargs = {'scope': scope, 'name': name, 'requester': requester, 'request_type': request_type,
-              'username': username, 'userdn': userdn,
+              'username': username, 'userdn': userdn, 'site': site,
+              'cloud': cloud, 'queue': queue, 'command': command,
               'transform_tag': transform_tag, 'status': status, 'locking': locking,
               'priority': priority, 'lifetime': lifetime, 'workload_id': workload_id,
               'new_poll_period': new_poll_period, 'update_poll_period': update_poll_period,
               'new_retries': new_retries, 'update_retries': update_retries,
+              'group_id': group_id, 'campaign': campaign, 'campaign_scope': campaign_scope,
+              'campaign_group': campaign_group, 'campaign_tag': campaign_tag,
               'max_new_retries': max_new_retries, 'max_update_retries': max_update_retries,
+              'additional_data_storage': additional_data_storage,
               'request_metadata': request_metadata, 'processing_metadata': processing_metadata,
               'session': session}
     return orm_requests.add_request(**kwargs)
@@ -160,11 +199,6 @@ def get_request_ids_by_name(name, session=None):
 @transactional_session
 def get_request_by_id_status(request_id, status=None, locking=False, session=None):
     req = orm_requests.get_request_by_id_status(request_id=request_id, status=status, locking=locking, session=session)
-    if req is not None and locking:
-        parameters = {}
-        parameters['locking'] = RequestLocking.Locking
-        parameters['updated_at'] = datetime.datetime.utcnow()
-        orm_requests.update_request(request_id=req['request_id'], parameters=parameters, session=session)
     return req
 
 
@@ -236,7 +270,7 @@ def generate_collection(transform, collection, relation_type=CollectionRelationT
     if collection.status is None:
         collection.status = CollectionStatus.Open
 
-    coll = {'transform_id': transform['request_id'],
+    coll = {'transform_id': transform['transform_id'],
             'request_id': transform['request_id'],
             'workload_id': transform['workload_id'],
             'coll_type': coll_type,
@@ -258,6 +292,9 @@ def generate_collection(transform, collection, relation_type=CollectionRelationT
 def generate_collections(transform):
     work = transform['transform_metadata']['work']
 
+    if not hasattr(work, 'get_input_collections'):
+        return []
+
     input_collections = work.get_input_collections()
     output_collections = work.get_output_collections()
     log_collections = work.get_log_collections()
@@ -277,8 +314,10 @@ def generate_collections(transform):
 
 @transactional_session
 def update_request_with_transforms(request_id, parameters,
+                                   origin_status=None,
                                    new_transforms=None, update_transforms=None,
-                                   new_messages=None, update_messages=None, session=None):
+                                   new_messages=None, update_messages=None,
+                                   new_conditions=None, session=None):
     """
     update an request.
 
@@ -298,15 +337,23 @@ def update_request_with_transforms(request_id, parameters,
 
             work = tf['transform_metadata']['work']
             tf_copy = copy.deepcopy(tf)
-            tf_id = orm_transforms.add_transform(**tf_copy, session=session)
+            ret_tf = orm_transforms.get_transform_by_name(request_id=request_id, name=tf['name'], session=session)
+            if ret_tf is None:
+                tf_id = orm_transforms.add_transform(**tf_copy, session=session)
+            else:
+                tf_id = ret_tf['transform_id']
             tf['transform_id'] = tf_id
 
             # work = tf['transform_metadata']['work']
             # original_work.set_work_id(tf_id, transforming=True)
             # original_work.set_status(WorkStatus.New)
-            work.set_work_id(tf_id, transforming=True)
-            work.set_status(WorkStatus.New)
-            workflow.refresh_works()
+            if hasattr(work, 'set_work_id'):
+                work.set_work_id(tf_id, transforming=True)
+            if hasattr(work, 'set_status'):
+                work.set_status(WorkStatus.New)
+            if workflow is not None:
+                if hasattr(workflow, 'refresh_works'):
+                    workflow.refresh_works()
 
             collections = generate_collections(tf)
             for coll in collections:
@@ -318,7 +365,8 @@ def update_request_with_transforms(request_id, parameters,
                 collection.coll_id = coll_id
 
             # update transform to record the coll_id
-            work.refresh_work()
+            if hasattr(work, 'refresh_works'):
+                work.refresh_work()
             orm_transforms.update_transform(transform_id=tf_id,
                                             parameters={'transform_metadata': tf['transform_metadata']},
                                             session=session)
@@ -332,7 +380,11 @@ def update_request_with_transforms(request_id, parameters,
         orm_messages.add_messages(new_messages, session=session)
     if update_messages:
         orm_messages.update_messages(update_messages, session=session)
-    return orm_requests.update_request(request_id, parameters, session=session), new_tf_ids, update_tf_ids
+
+    if new_conditions:
+        orm_conditions.add_conditions(new_conditions, session=session)
+
+    return orm_requests.update_request(request_id, parameters, origin_status=origin_status, session=session), new_tf_ids, update_tf_ids
 
 
 @transactional_session
@@ -368,7 +420,7 @@ def get_operation_request_msgs(locking=False, bulk_size=None, session=None):
 @transactional_session
 def get_requests_by_status_type(status, request_type=None, time_period=None, locking=False, bulk_size=None, to_json=False,
                                 by_substatus=False, not_lock=False, next_poll_at=None, new_poll=False, update_poll=False,
-                                only_return_id=False, session=None):
+                                min_request_id=None, only_return_id=False, session=None):
     """
     Get requests by status and type
 
@@ -381,69 +433,28 @@ def get_requests_by_status_type(status, request_type=None, time_period=None, loc
 
     :returns: list of Request.
     """
-    if locking:
-        if not only_return_id and bulk_size:
-            # order by cannot work together with locking. So first select 2 * bulk_size without locking with order by.
-            # then select with locking.
-            req_ids = orm_requests.get_requests_by_status_type(status, request_type, time_period, locking=locking, bulk_size=bulk_size * 2,
-                                                               locking_for_update=False, to_json=False, by_substatus=by_substatus,
-                                                               new_poll=new_poll, update_poll=update_poll,
-                                                               only_return_id=True, session=session)
-            if req_ids:
-                req2s = orm_requests.get_requests_by_status_type(status, request_type, time_period, request_ids=req_ids,
-                                                                 locking=locking, locking_for_update=False, bulk_size=None,
-                                                                 to_json=to_json,
-                                                                 new_poll=new_poll, update_poll=update_poll,
-                                                                 by_substatus=by_substatus, session=session)
-                if req2s:
-                    # reqs = req2s[:bulk_size]
-                    # order requests
-                    reqs = []
-                    for req_id in req_ids:
-                        if len(reqs) >= bulk_size:
-                            break
-                        for req in req2s:
-                            if req['request_id'] == req_id:
-                                reqs.append(req)
-                                break
-                    # reqs = reqs[:bulk_size]
-                else:
-                    reqs = []
-            else:
-                reqs = []
-        else:
-            reqs = orm_requests.get_requests_by_status_type(status, request_type, time_period, locking=locking, locking_for_update=False,
-                                                            bulk_size=bulk_size,
-                                                            new_poll=new_poll, update_poll=update_poll, only_return_id=only_return_id,
-                                                            to_json=to_json, by_substatus=by_substatus, session=session)
+    if min_request_id is None:
+        min_request_id = get_min_request_id(session=session)
+        if not min_request_id:
+            min_request_id = 0
 
-        parameters = {}
-        if not not_lock:
-            parameters['locking'] = RequestLocking.Locking
-        if next_poll_at:
-            parameters['next_poll_at'] = next_poll_at
-        parameters['updated_at'] = datetime.datetime.utcnow()
-        if parameters:
-            for req in reqs:
-                if type(req) in [dict]:
-                    orm_requests.update_request(request_id=req['request_id'], parameters=parameters, session=session)
-                else:
-                    orm_requests.update_request(request_id=req, parameters=parameters, session=session)
-    else:
-        reqs = orm_requests.get_requests_by_status_type(status, request_type, time_period, locking=locking, bulk_size=bulk_size,
-                                                        new_poll=new_poll, update_poll=update_poll, only_return_id=only_return_id,
-                                                        to_json=to_json, by_substatus=by_substatus, session=session)
+    reqs = orm_requests.get_requests_by_status_type(status, request_type, time_period, locking=locking, locking_for_update=False,
+                                                    bulk_size=bulk_size, min_request_id=min_request_id, not_lock=not_lock,
+                                                    new_poll=new_poll, update_poll=update_poll, only_return_id=only_return_id,
+                                                    to_json=to_json, by_substatus=by_substatus, session=session)
+
     return reqs
 
 
 @transactional_session
-def clean_locking(time_period=3600, session=None):
+def clean_locking(time_period=3600, min_request_id=None, health_items=[], force=False, hostname=None, pid=None, session=None):
     """
     Clearn locking which is older than time period.
 
     :param time_period in seconds
     """
-    orm_requests.clean_locking(time_period=time_period, session=session)
+    orm_requests.clean_locking(time_period=time_period, min_request_id=min_request_id, health_items=health_items,
+                               force=force, hostname=hostname, pid=pid, session=session)
 
 
 @transactional_session
@@ -477,3 +488,28 @@ def get_num_active_requests(active_status=None, session=None):
 @read_session
 def get_active_requests(active_status=None, session=None):
     return orm_requests.get_active_requests(active_status=active_status, session=session)
+
+
+@transactional_session
+def set_min_request_id(min_request_id, session=None):
+    """
+    Set min request id
+
+    :param min_request_id: Int of min_request_id.
+    """
+    orm_meta.add_meta_item(name='min_request_id', status=MetaStatus.Active, description="min request id",
+                           meta_info={"min_request_id": min_request_id}, session=None)
+
+
+@read_session
+def get_min_request_id(session=None):
+    """
+    Get min request id
+
+    :returns min_request_id: Int of min_request_id.
+    """
+    meta = orm_meta.get_meta_item(name='min_request_id', session=session)
+    if not meta:
+        return None
+    else:
+        return meta['meta_info'].get("min_request_id", None)

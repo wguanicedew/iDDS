@@ -6,12 +6,14 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2020 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2020 - 2025
 
 import copy
 import datetime
+import json
 import logging
 import inspect
+import os
 import random
 import uuid
 
@@ -259,6 +261,16 @@ class CompositeCondition(Base):
     def get_work_from_id(self, work_id, works):
         return works[work_id]
 
+    def clean(self):
+        for work in self.true_works:
+            if isinstance(work, CompositeCondition):
+                work.clean()
+            else:
+                true_work_meta = self.get_metadata_item('true_works', {})
+                if work.get_internal_id() in true_work_meta:
+                    if true_work_meta[work.get_internal_id()]['triggered'] and not work.submitted:
+                        true_work_meta[work.get_internal_id()]['triggered'] = False
+
     def load_conditions(self, works):
         # print("load_conditions")
         self.log_debug("load_conditions conditions: %s" % self.conditions)
@@ -405,7 +417,9 @@ class CompositeCondition(Base):
     def get_cond_status(self):
         if self.operator == ConditionOperator.And:
             for cond in self.conditions:
-                if not self.get_current_cond_status(cond):
+                cond_status = self.get_current_cond_status(cond)
+                # self.log_debug(f"And cond {cond} status: {cond_status}")
+                if not cond_status:
                     return False
             return True
         else:
@@ -429,8 +443,10 @@ class CompositeCondition(Base):
 
     def get_next_works(self, trigger=ConditionTrigger.NotTriggered):
         works = []
+        self.log_debug(f"get_next_works get_cond_status: {self.get_cond_status()} trigger: {trigger}")
         if self.get_cond_status():
             true_work_meta = self.get_metadata_item('true_works', {})
+            self.log_debug(f"get_next_works true_work_meta: {true_work_meta}")
             for work in self.true_works:
                 if isinstance(work, CompositeCondition):
                     works = works + work.get_next_works(trigger=trigger)
@@ -451,6 +467,7 @@ class CompositeCondition(Base):
             self.add_metadata_item('true_works', true_work_meta)
         else:
             false_work_meta = self.get_metadata_item('false_works', {})
+            self.log_debug(f"get_next_works false_work_meta: {false_work_meta}")
             for work in self.false_works:
                 if isinstance(work, CompositeCondition):
                     works = works + work.get_next_works(trigger=trigger)
@@ -696,6 +713,22 @@ class WorkflowBase(Base):
 
         self.synchronized = False
 
+        self.additional_data_storage = None
+
+        self.campaign = None
+        self.campaign_scope = None
+        self.campaign_group = None
+        self.campaign_tag = None
+        self.max_processing_requests = -1
+
+        self._request_cache = None
+
+        self.with_steps = False
+
+        self.is_workflow_step = False
+        self.step_name = None
+        self.workflow_data = None
+
         """
         self._running_data_names = []
         for name in ['internal_id', 'template_work_id', 'workload_id', 'work_sequence', 'terminated_works',
@@ -714,6 +747,81 @@ class WorkflowBase(Base):
     @name.setter
     def name(self, value):
         self._name = value
+
+    @property
+    def is_workflow_step(self):
+        return self._is_workflow_step
+
+    @is_workflow_step.setter
+    def is_workflow_step(self, value):
+        self._is_workflow_step = value
+
+    @property
+    def step_name(self):
+        return self._step_name
+
+    @step_name.setter
+    def step_name(self, value):
+        self._step_name = value
+
+    @property
+    def workflow_data(self):
+        return self._workflow_data
+
+    @workflow_data.setter
+    def workflow_data(self, value):
+        self._workflow_data = value
+
+    @property
+    def campaign(self):
+        return self._campaign
+
+    @campaign.setter
+    def campaign(self, value):
+        self._campaign = value
+
+    @property
+    def campaign_scope(self):
+        return self._campaign_scope
+
+    @campaign_scope.setter
+    def campaign_scope(self, value):
+        self._campaign_scope = value
+
+    @property
+    def campaign_group(self):
+        return self._campaign_group
+
+    @campaign_group.setter
+    def campaign_group(self, value):
+        self._campaign_group = value
+
+    @property
+    def campaign_tag(self):
+        return self._campaign_tag
+
+    @campaign_tag.setter
+    def campaign_tag(self, value):
+        self._campaign_tag = value
+
+    @property
+    def request_cache(self):
+        return self._request_cache
+
+    @request_cache.setter
+    def request_cache(self, value):
+        self._request_cache = value
+
+    def set_request_cache(self, value):
+        self.request_cache = value
+
+    @property
+    def max_processing_requests(self):
+        return self._max_processing_requests
+
+    @max_processing_requests.setter
+    def max_processing_requests(self, value):
+        self._max_processing_requests = value
 
     def get_template_work_id(self):
         return self.template_work_id
@@ -803,8 +911,14 @@ class WorkflowBase(Base):
                                         'transforming': work.transforming}
         self.add_metadata_item('works', work_metadata)
 
-    def refresh_works(self):
+    def refresh_works(self, clean=False):
         work_metadata = {}
+        if clean:
+            self.submitting_works = []
+            for cond_id in self.conditions:
+                cond = self.conditions[cond_id]
+                cond.clean()
+
         if self._works:
             for k in self._works:
                 work = self._works[k]
@@ -995,6 +1109,14 @@ class WorkflowBase(Base):
         self.add_metadata_item('first_initial', value)
 
     @property
+    def internal_id_relation_map(self):
+        return self.get_metadata_item('internal_id_relation_map', False)
+
+    @internal_id_relation_map.setter
+    def internal_id_relation_map(self, value):
+        self.add_metadata_item('internal_id_relation_map', value)
+
+    @property
     def to_start_works(self):
         return self.get_metadata_item('to_start_works', [])
 
@@ -1130,6 +1252,83 @@ class WorkflowBase(Base):
     def to_cancel(self, value):
         self.add_metadata_item('to_cancel', value)
 
+    def is_with_steps(self):
+        return self.with_steps
+
+    def set_additional_data_storage(self, storage):
+        self.additional_data_storage = storage
+
+    def get_additional_data_storage(self):
+        return self.additional_data_storage
+
+    def create_workflow_step(self, batches):
+        workflow = Workflow()
+        workflow.set_internal_id(self.get_internal_id())
+        workflow.campaign = self.campaign
+        workflow.campaign_scope = self.campaign_scope
+        workflow.campaign_group = self.campaign_group
+        workflow.campaign_tag = self.campaign_tag
+        workflow.max_processing_requests = self.max_processing_requests
+        workflow.name = self.name
+        workflow.username = self.username
+        workflow.userdn = self.userdn
+        workflow.lifetime = self.lifetime
+        workflow.workload_id = self.get_workload_id()
+        workflow.is_workflow_step = True
+
+        data_batches = {}
+        step_names = []
+        for name, data_file in batches:
+            filename = data_file['filename']
+            with open(filename, 'r') as f:
+                data = json.load(f)
+            data_batches[name] = data
+            step_names.append(name)
+        zip_data = self.zip_data(data_batches)
+        workflow.step_name = ",".join(step_names)
+        workflow.workflow_data = zip_data
+
+        return workflow
+
+    def split_workflow_to_steps(self, request_cache=None, max_request_length=None):
+        workflow = self
+        data_length = len(json_dumps(workflow))
+        if request_cache and max_request_length and data_length > max_request_length:
+            logging.info(f"Workflow size {data_length} > max request length {max_request_length}, will split it into steps")
+            storage = os.path.join(request_cache, self.get_internal_id())
+            if not os.path.exists(storage):
+                os.makedirs(storage, exist_ok=True)
+            storage_name = "IDDS_WORKFLOW_ADDITIONAL_STORAGE"
+            # workflow.set_additional_data_storage(storage)
+            workflow.set_additional_data_storage(storage_name)
+            data_files = workflow.convert_data_to_additional_data_storage(storage, storage_name=storage_name)
+            current_size = 0
+            current_batch = []
+            workflow_steps = []
+            for work_name, data_file in data_files.items():
+                # filename = data_file['filename']
+                # size = data_file['size']
+                zip_size = data_file['zip_size']
+                if current_size + zip_size <= max_request_length:
+                    current_batch.append((work_name, data_file))
+                    current_size += zip_size
+                else:
+                    if current_batch:
+                        workflow_step = self.create_workflow_step(current_batch)
+                        workflow_steps.append(workflow_step)
+                    current_batch = [(work_name, data_file)]
+                    current_size = zip_size
+            if current_batch:
+                workflow_step = self.create_workflow_step(current_batch)
+                workflow_steps.append(workflow_step)
+
+            self.with_steps = True
+
+            return workflow_steps
+        else:
+            logging.info(f"Workflow size {data_length} <= max request length {max_request_length} or max request length is not defined, will not split it into steps")
+        return []
+
     def refresh(self):
         self.refresh_works()
 
@@ -1159,6 +1358,9 @@ class WorkflowBase(Base):
         if self.logger is None:
             self.setup_logger()
         self.logger.debug(info)
+
+    def set_internal_id(self, value):
+        self.internal_id = value
 
     def get_internal_id(self):
         return self.internal_id
@@ -1222,28 +1424,29 @@ class WorkflowBase(Base):
             self.current_running_works.append(work.get_internal_id())
             self.last_work = work.get_internal_id()
         else:
-            new_parameters = self.get_destination_parameters(work_id)
-            if new_parameters:
-                work.set_parameters(new_parameters)
-            work.sequence_id = self.num_total_works
+            if work.get_internal_id() not in self.new_to_run_works:
+                new_parameters = self.get_destination_parameters(work_id)
+                if new_parameters:
+                    work.set_parameters(new_parameters)
+                work.sequence_id = self.num_total_works
 
-            work.num_run = self.get_combined_num_run()
-            work.initialize_work()
-            work.sync_global_parameters(self.global_parameters, self.sliced_global_parameters)
-            work.renew_parameters_from_attributes()
-            if work.parent_workload_id is None and self.num_total_works > 0:
-                last_work_id = self.work_sequence[str(self.num_total_works - 1)]
-                last_work = self.works[last_work_id]
-                if isinstance(last_work, Work):
-                    work.parent_workload_id = last_work.workload_id
-                last_work.add_next_work(work.get_internal_id())
-            works = self.works
-            self.works = works
-            # self.work_sequence.append(new_work.get_internal_id())
-            self.work_sequence[str(self.num_total_works)] = work.get_internal_id()
-            self.num_total_works += 1
-            self.new_to_run_works.append(work.get_internal_id())
-            self.last_work = work.get_internal_id()
+                work.num_run = self.get_combined_num_run()
+                work.initialize_work()
+                work.sync_global_parameters(self.global_parameters, self.sliced_global_parameters)
+                work.renew_parameters_from_attributes()
+                if work.parent_workload_id is None and self.num_total_works > 0:
+                    last_work_id = self.work_sequence[str(self.num_total_works - 1)]
+                    last_work = self.works[last_work_id]
+                    if isinstance(last_work, Work):
+                        work.parent_workload_id = last_work.workload_id
+                    last_work.add_next_work(work.get_internal_id())
+                works = self.works
+                self.works = works
+                # self.work_sequence.append(new_work.get_internal_id())
+                self.work_sequence[str(self.num_total_works)] = work.get_internal_id()
+                self.num_total_works += 1
+                self.new_to_run_works.append(work.get_internal_id())
+                self.last_work = work.get_internal_id()
 
         return work
 
@@ -1281,6 +1484,39 @@ class WorkflowBase(Base):
     def get_workload_id(self):
         return self.workload_id
 
+    def get_site(self):
+        try:
+            work_id = self.primary_initial_work
+            if not work_id:
+                work_id = list(self.works.keys())[0]
+            work = self.works[work_id]
+            return work.get_site()
+        except Exception:
+            pass
+        return None
+
+    def get_cloud(self):
+        try:
+            work_id = self.primary_initial_work
+            if not work_id:
+                work_id = list(self.works.keys())[0]
+            work = self.works[work_id]
+            return work.get_cloud()
+        except Exception:
+            pass
+        return None
+
+    def get_queue(self):
+        try:
+            work_id = self.primary_initial_work
+            if not work_id:
+                work_id = list(self.works.keys())[0]
+            work = self.works[work_id]
+            return work.get_queue()
+        except Exception:
+            pass
+        return None
+
     def add_initial_works(self, work):
         self.initial_works.append(work.get_internal_id())
         if self.primary_initial_work is None:
@@ -1299,6 +1535,17 @@ class WorkflowBase(Base):
     def add_build_work(self, work, initial=False, primary=False):
         self.build_work = work
         self.build_work.set_build_work()
+
+    def convert_data_to_additional_data_storage(self, storage, storage_name=None, replace_storage_name=False):
+        data_files = {}
+        for work_id in self.works.keys():
+            work = self.works[work_id]
+            data_file = work.convert_data_to_additional_data_storage(storage, storage_name=storage_name, replace_storage_name=replace_storage_name)
+            if data_file:
+                work_name, filename, size, zip_size = data_file
+                data_files[work_name] = {'filename': filename, 'size': size, 'zip_size': zip_size}
+            self.works[work_id] = work
+        return data_files
 
     def get_build_work(self):
         return self.build_work
@@ -1433,7 +1680,7 @@ class WorkflowBase(Base):
         self.next_works = next_works
 
     def enable_next_works(self, work, cond):
-        self.log_debug("works: %s" % str(self.works))
+        # self.log_debug("works: %s" % str(self.works))
         # self.log_debug("Checking Work %s condition: %s" % (work.get_internal_id(),
         #                                                    json_dumps(cond, sort_keys=True, indent=4)))
         # self.log_debug("Checking Work %s condition: %s" % (work.get_internal_id(), cond.get_internal_id()))
@@ -1450,6 +1697,7 @@ class WorkflowBase(Base):
         new_next_works = []
         if next_works is not None:
             for next_work in next_works:
+                self.log_info(f"next work {next_work.get_internal_id()} is_submitted: {next_work.submitted}, transforming: {next_work.transforming}")
                 # parameters = self.get_destination_parameters(next_work.get_internal_id())
                 new_next_work = self.get_new_work_to_run(next_work.get_internal_id())
                 work.add_next_work(new_next_work.get_internal_id())
@@ -1478,23 +1726,40 @@ class WorkflowBase(Base):
     def __str__(self):
         return str(json_dumps(self))
 
+    def format_works(self, works):
+        if not works:
+            return works
+        all_works = self.get_all_works(synchronize=False)
+        task_name_to_internal_id_map = {}
+        for work in all_works:
+            task_name_to_internal_id_map[work.task_name] = work.get_internal_id()
+
+        for work in works:
+            parent_task_names = work.get_ancestry_works()
+            parent_internal_ids = []
+            if parent_task_names:
+                parent_internal_ids = [task_name_to_internal_id_map[t_name] for t_name in parent_task_names]
+            work.parent_internal_ids = parent_internal_ids
+        return works
+
     def get_new_works(self, synchronize=True):
         """
         *** Function called by Marshaller agent.
 
         new works to be ready to start
         """
-        self.logger.info("%s get_new_works" % self.get_internal_id())
-        if self.to_cancel:
-            return []
+        self.logger.info(f"{self.get_internal_id()} get_new_works, to_cancel: {self.to_cancel}")
+        # if self.to_cancel:
+        #     return []
 
         if synchronize:
             self.sync_works(to_cancel=self.to_cancel)
         works = []
 
+        self.logger.info(f"{self.get_internal_id()} submitting_works: {self.submitting_works}")
         if self.submitting_works:
             # wait the work to be submitted
-            return works
+            return self.format_works(works)
 
         if self.to_start_works:
             self.logger.info("%s to_start_works: %s" % (self.get_internal_id(), str(self.to_start_works)))
@@ -1502,8 +1767,11 @@ class WorkflowBase(Base):
             init_works = self.init_works
             starting_works = []
             for work_id in to_start_works:
-                if not self.works[work_id].has_dependency():
-                    starting_works.append(work_id)
+                # here release all works, then
+                # let the transformer check the parent_internal_id
+                # if not self.works[work_id].has_dependency():
+                #     starting_works.append(work_id)
+                starting_works.append(work_id)
             if not starting_works:
                 work_id = to_start_works.pop(0)
                 starting_works.append(work_id)
@@ -1517,6 +1785,7 @@ class WorkflowBase(Base):
             self.logger.info("%s starting_works: %s" % (self.get_internal_id(), str(starting_works)))
 
         # new_workflows = []
+        self.logger.info(f"{self.get_internal_id()} new_to_run_works: {self.new_to_run_works}")
         for k in self.new_to_run_works:
             if isinstance(self.works[k], Work):
                 self.works[k] = self.get_new_parameters_for_work(self.works[k])
@@ -1532,7 +1801,16 @@ class WorkflowBase(Base):
         # for k in new_workflows:
         #     self.current_running_works.append(k)
         self.logger.info("%s get_new_works done" % self.get_internal_id())
-        return works
+
+        # make sure internal_id is loaded
+        internal_id_relation_map = self.internal_id_relation_map
+        self.logger.debug(f"internal_id_relation_map: {internal_id_relation_map}")
+        if internal_id_relation_map and works:
+            for i, w in enumerate(works):
+                if not works[i].parent_internal_id:
+                    self.logger.debug(f"internal_id {works[i].internal_id} loads parent_internal_id {works[i].parent_internal_id}")
+                    works[i].parent_internal_id = internal_id_relation_map.get(works[i].internal_id, None)
+        return self.format_works(works)
 
     def get_current_works(self):
         """
@@ -1614,23 +1892,20 @@ class WorkflowBase(Base):
         self.log_debug("independent works: %s" % (str(ind_work_ids)))
         self.independent_works = []
         self.work_dependencies = {}
+
+        all_works = self.get_all_works(synchronize=False)
+        task_name_to_internal_id_map = {}
+        for work in all_works:
+            task_name_to_internal_id_map[work.task_name] = work.get_internal_id()
+
         for ind_work_id in ind_work_ids:
             work = self.works[ind_work_id]
+            parent_task_names = work.get_ancestry_works()
             self.work_dependencies[ind_work_id] = []
-            for ind_work_id1 in ind_work_ids:
-                if ind_work_id == ind_work_id1:
-                    continue
-                work1 = self.works[ind_work_id1]
-                if work.depend_on(work1):
-                    self.work_dependencies[ind_work_id].append(ind_work_id1)
-        self.log_debug('work dependencies 1: %s' % str(self.work_dependencies))
-
-        max_depth = len(ind_work_ids) + 1
-        work_dependencies = copy.deepcopy(self.work_dependencies)
-        for work_id in work_dependencies:
-            deps = self.get_dependency_works(work_id, 0, max_depth)
-            self.work_dependencies[work_id] = deps
-        self.log_debug('work dependencies 2: %s' % str(self.work_dependencies))
+            if parent_task_names:
+                parent_internal_ids = [task_name_to_internal_id_map[t_name] for t_name in parent_task_names]
+                self.work_dependencies[ind_work_id] = parent_internal_ids
+        self.log_debug('work dependencies: %s' % str(self.work_dependencies))
 
         while True:
             # self.log_debug('independent_works N: %s' % str(self.independent_works))
@@ -1661,6 +1936,16 @@ class WorkflowBase(Base):
                 break
         self.log_debug('independent_works: %s' % str(self.independent_works))
         self.log_debug("ordered independent works")
+
+        pre_work = None
+        internal_id_relation_map = {}
+        for work_id in self.independent_works:
+            work = self.works[work_id]
+            if pre_work is not None:
+                work.parent_internal_id = pre_work.internal_id
+            pre_work = work
+            internal_id_relation_map[work.internal_id] = work.parent_internal_id
+        self.internal_id_relation_map = internal_id_relation_map
 
     def first_initialize(self):
         # set new_to_run works
@@ -1700,6 +1985,9 @@ class WorkflowBase(Base):
             if work.get_internal_id() not in self.current_running_works and work.get_status() in [WorkStatus.Transforming]:
                 self.current_running_works.append(work.get_internal_id())
 
+        self.log_debug(f"{self.get_internal_id()} current_running_works: {self.current_running_works}")
+        self.log_debug(f"{self.get_internal_id()} new_to_run_works: {self.new_to_run_works}")
+        self.log_debug(f"{self.get_internal_id()} submitting_works: {self.submitting_works}")
         submitting_works = self.submitting_works
         for work in [self.works[k] for k in self.new_to_run_works]:
             if work.transforming:
@@ -1713,7 +2001,9 @@ class WorkflowBase(Base):
             if work.submitted:
                 self.submitting_works.remove(work.get_internal_id())
 
-        for work in [self.works[k] for k in self.current_running_works]:
+        # for work in [self.works[k] for k in self.current_running_works]:
+        for k in self.current_running_works:
+            work = self.works[k]
             if isinstance(work, Workflow):
                 work.sync_works(to_cancel=self.to_cancel)
 
@@ -1722,32 +2012,37 @@ class WorkflowBase(Base):
                 self.set_source_parameters(work.get_internal_id())
                 self.sync_global_parameters_from_work(work)
 
-            if work.get_internal_id() in self.work_conds:
-                self.log_debug("Work %s has condition dependencies %s" % (work.get_internal_id(),
-                                                                          json_dumps(self.work_conds[work.get_internal_id()], sort_keys=True, indent=4)))
-                for cond_id in self.work_conds[work.get_internal_id()]:
-                    cond = self.conditions[cond_id]
-                    # self.log_debug("Work %s has condition dependencie %s" % (work.get_internal_id(),
-                    #                                                          json_dumps(cond, sort_keys=True, indent=4)))
-                    self.log_debug("Work %s has condition dependencie %s" % (work.get_internal_id(), cond.get_internal_id()))
-
-                    self.enable_next_works(work, cond)
-
-            if work.is_terminated(synchronize=False):
                 self.log_info("Work %s num_run %s is terminated(%s)" % (work.get_internal_id(), self.num_run, work.get_status()))
-                self.log_debug("Work conditions: %s" % json_dumps(self.work_conds, sort_keys=True, indent=4))
+                # self.log_debug("Work conditions: %s" % json_dumps(self.work_conds, sort_keys=True, indent=4))
                 if work.get_internal_id() not in self.work_conds:
                     # has no next work
                     self.log_info("Work %s has no condition dependencies" % work.get_internal_id())
-                    self.terminated_works.append(work.get_internal_id())
-                    self.current_running_works.remove(work.get_internal_id())
+                    if work.get_internal_id() not in self.terminated_works:
+                        self.terminated_works.append(work.get_internal_id())
+                    if work.get_internal_id() in self.current_running_works:
+                        self.current_running_works.remove(work.get_internal_id())
                 else:
                     # self.log_debug("Work %s has condition dependencies %s" % (work.get_internal_id(),
                     #                                                           json_dumps(self.work_conds[work.get_template_id()], sort_keys=True, indent=4)))
                     # for cond in self.work_conds[work.get_template_id()]:
                     #     self.enable_next_works(work, cond)
-                    self.terminated_works.append(work.get_internal_id())
-                    self.current_running_works.remove(work.get_internal_id())
+                    if work.get_internal_id() not in self.terminated_works:
+                        self.terminated_works.append(work.get_internal_id())
+                    if work.get_internal_id() in self.current_running_works:
+                        self.current_running_works.remove(work.get_internal_id())
+
+        for k in self.work_conds:
+            work = self.works[k]
+            # self.log_debug("Work %s has condition dependencies %s" % (work.get_internal_id(),
+            #                                                           json_dumps(self.work_conds[work.get_internal_id()], sort_keys=True, indent=4)))
+            self.log_debug("Work %s has condition dependencies %s" % (work.get_internal_id(), self.work_conds[work.get_internal_id()]))
+            for cond_id in self.work_conds[work.get_internal_id()]:
+                cond = self.conditions[cond_id]
+                # self.log_debug("Work %s has condition dependencie %s" % (work.get_internal_id(),
+                #                                                          json_dumps(cond, sort_keys=True, indent=4)))
+                self.log_debug("Work %s has condition dependencie %s" % (work.get_internal_id(), cond.get_internal_id()))
+
+                self.enable_next_works(work, cond)
 
         self.num_finished_works = 0
         self.num_subfinished_works = 0
@@ -1961,6 +2256,12 @@ class WorkflowBase(Base):
         """
         return self.is_terminated(synchronize=synchronize) and (self.num_finished_works + self.num_subfinished_works > 0 and self.num_finished_works + self.num_subfinished_works <= self.num_total_works)
 
+    def is_processed(self, synchronize=True):
+        """
+        *** Function called by Transformer agent.
+        """
+        return self.is_terminated(synchronize=synchronize) and (self.num_finished_works + self.num_subfinished_works > 0 and self.num_finished_works + self.num_subfinished_works <= self.num_total_works)
+
     def is_failed(self, synchronize=True):
         """
         *** Function called by Marshaller agent.
@@ -2104,6 +2405,57 @@ class Workflow(Base):
     def get_template_id(self):
         return self.template.get_template_id()
 
+    def is_with_steps(self):
+        return self.template.is_with_steps()
+
+    def set_additional_data_storage(self, storage):
+        self.template.set_additional_data_storage(storage)
+
+    def get_additional_data_storage(self):
+        return self.template.get_additional_data_storage()
+
+    def convert_data_to_additional_data_storage(self, storage, storage_name=None, replace_storage_name=False):
+        return self.template.convert_data_to_additional_data_storage(storage, storage_name=storage_name, replace_storage_name=replace_storage_name)
+
+    @property
+    def is_workflow_step(self):
+        if self.runs:
+            return self.runs[str(self.num_run)].is_workflow_step
+        return self.template.is_workflow_step
+
+    @is_workflow_step.setter
+    def is_workflow_step(self, value):
+        if self.runs:
+            self.runs[str(self.num_run)].is_workflow_step = value
+        self.template.is_workflow_step = value
+
+    @property
+    def step_name(self):
+        if self.runs:
+            return self.runs[str(self.num_run)].step_name
+        return self.template.step_name
+
+    @step_name.setter
+    def step_name(self, value):
+        if self.runs:
+            self.runs[str(self.num_run)].step_name = value
+        self.template.step_name = value
+
+    @property
+    def workflow_data(self):
+        if self.runs:
+            return self.runs[str(self.num_run)].workflow_data
+        return self.template.workflow_data
+
+    @workflow_data.setter
+    def workflow_data(self, value):
+        if self.runs:
+            self.runs[str(self.num_run)].workflow_data = value
+        self.template.workflow_data = value
+
+    def split_workflow_to_steps(self, request_cache=None, max_request_length=None):
+        return self.template.split_workflow_to_steps(request_cache=request_cache, max_request_length=max_request_length)
+
     @property
     def metadata(self):
         run_metadata = {'build': self.get_build_metadata(),
@@ -2171,6 +2523,46 @@ class Workflow(Base):
     @name.setter
     def name(self, value):
         self.template.name = value
+
+    @property
+    def campaign(self):
+        return self.template.campaign
+
+    @campaign.setter
+    def campaign(self, value):
+        self.template.campaign = value
+
+    @property
+    def campaign_scope(self):
+        return self.template.campaign_scope
+
+    @campaign_scope.setter
+    def campaign_scope(self, value):
+        self.template.campaign_scope = value
+
+    @property
+    def campaign_group(self):
+        return self.template._campaign_group
+
+    @campaign_group.setter
+    def campaign_group(self, value):
+        self.template._campaign_group = value
+
+    @property
+    def campaign_tag(self):
+        return self.template._campaign_tag
+
+    @campaign_tag.setter
+    def campaign_tag(self, value):
+        self.template._campaign_tag = value
+
+    @property
+    def max_processing_requests(self):
+        return self.template._max_processing_requests
+
+    @max_processing_requests.setter
+    def max_processing_requests(self, value):
+        self.template._max_processing_requests = value
 
     @property
     def username(self):
@@ -2260,6 +2652,11 @@ class Workflow(Base):
             self.template.workload_id = workload_id
         # self.dynamic.workload_id = workload_id
 
+    def set_internal_id(self, value):
+        if self.runs:
+            return self.runs[str(self.num_run)].set_internal_id(value)
+        return self.template.set_internal_id(value)
+
     def get_internal_id(self):
         if self.runs:
             return self.runs[str(self.num_run)].get_internal_id()
@@ -2269,6 +2666,15 @@ class Workflow(Base):
         if self.runs:
             return self.runs[str(self.num_run)].workload_id
         return self.template.workload_id
+
+    def get_site(self):
+        return self.template.get_site()
+
+    def get_cloud(self):
+        return self.template.get_cloud()
+
+    def get_queue(self):
+        return self.template.get_queue()
 
     def add_work(self, work, initial=False, primary=False):
         self.template.add_work(work, initial, primary)
@@ -2351,6 +2757,7 @@ class Workflow(Base):
 
         build_work = self.get_build_work()
         if build_work:
+            build_work.num_run = 0
             if not (build_work.is_started() or build_work.is_starting()):
                 return build_work
             elif not build_work.is_terminated():
@@ -2370,12 +2777,16 @@ class Workflow(Base):
             works = self.runs[str(self.num_run)].get_new_works(synchronize=True)
             self.logger.info("%s new workers: %s" % (self.get_internal_id(), str(works)))
             self.runs[str(self.num_run)].transforming = True
+            if works:
+                for work in works:
+                    work.num_run = int(self.num_run) if self.num_run is not None else 0
         self.logger.info("%s get_new_works done" % self.get_internal_id())
         return works
 
     def get_current_works(self):
         build_work = self.get_build_work()
         if build_work:
+            build_work.num_run = 0
             if (build_work.is_started() or build_work.is_starting()):
                 if (not build_work.is_terminated()):
                     return [build_work]
@@ -2386,7 +2797,9 @@ class Workflow(Base):
 
         self.sync_works(to_cancel=self.to_cancel)
         if self.runs:
-            return self.runs[str(self.num_run)].get_current_works()
+            works = self.runs[str(self.num_run)].get_current_works()
+            for work in works:
+                work.num_run = int(self.num_run) if self.num_run is not None else 0
         return []
 
     def get_all_works(self, synchronize=True):
@@ -2396,6 +2809,7 @@ class Workflow(Base):
         build_work = self.get_build_work()
         if build_work:
             if build_work.is_finished():
+                build_work.num_run = 0
                 works = [build_work]
             else:
                 return [build_work]
@@ -2404,7 +2818,12 @@ class Workflow(Base):
             self.sync_works(to_cancel=self.to_cancel)
         if self.runs:
             run_works = self.runs[str(self.num_run)].get_all_works(synchronize=False)
+            if run_works:
+                for work in run_works:
+                    work.num_run = int(self.num_run) if self.num_run is not None else 0
+
             works = works + run_works
+
         self.logger.info("%s get_all_works done" % self.get_internal_id())
         return works
 
@@ -2484,6 +2903,20 @@ class Workflow(Base):
                 else:
                     return False
             return self.runs[str(self.num_run)].is_subfinished(synchronize=False)
+        return False
+
+    def is_processed(self, synchronize=True):
+        if self.is_terminated(synchronize=synchronize):
+            build_work = self.get_build_work()
+            if build_work:
+                if build_work.is_terminated():
+                    if not build_work.is_processed():
+                        return False
+                    else:
+                        pass
+                else:
+                    return False
+            return self.runs[str(self.num_run)].is_processed(synchronize=False)
         return False
 
     def is_failed(self, synchronize=True):
@@ -2582,9 +3015,9 @@ class Workflow(Base):
     def refresh(self):
         self.refresh_works()
 
-    def refresh_works(self):
+    def refresh_works(self, clean=False):
         if self.runs:
-            self.runs[str(self.num_run)].refresh_works()
+            self.runs[str(self.num_run)].refresh_works(clean=clean)
 
     def sync_works(self, to_cancel=False):
         if to_cancel:

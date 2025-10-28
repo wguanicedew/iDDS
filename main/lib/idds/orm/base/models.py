@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2023
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2025
 
 
 """
@@ -23,17 +23,18 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import object_mapper
 from sqlalchemy.schema import CheckConstraint, UniqueConstraint, Index, PrimaryKeyConstraint, ForeignKeyConstraint, Sequence, Table
 
-from idds.common.constants import (RequestType, RequestStatus, RequestLocking,
+from idds.common.constants import (RequestGroupType, RequestGroupStatus, RequestGroupLocking,
+                                   RequestType, RequestStatus, RequestLocking,
                                    WorkprogressStatus, WorkprogressLocking,
                                    TransformType, TransformStatus, TransformLocking,
-                                   ProcessingStatus, ProcessingLocking,
+                                   ProcessingType, ProcessingStatus, ProcessingLocking,
                                    CollectionStatus, CollectionLocking, CollectionType,
                                    CollectionRelationType, ContentType, ContentRelationType,
                                    ContentStatus, ContentFetchStatus, ContentLocking, GranularityType,
                                    MessageType, MessageStatus, MessageLocking,
                                    MessageSource, MessageDestination, ThrottlerStatus,
                                    CommandType, CommandStatus, CommandLocking,
-                                   CommandLocation, HealthStatus)
+                                   CommandLocation, HealthStatus, MetaStatus)
 from idds.common.event import (EventType, EventStatus)
 from idds.common.utils import date_to_str
 from idds.orm.base.enum import EnumSymbol
@@ -131,6 +132,61 @@ class ModelBase(object):
         return obj
 
 
+class RequestGroup(BASE, ModelBase):
+    """Represents a pre-cache request from other service"""
+    __tablename__ = 'requests_group'
+    group_id = Column(BigInteger().with_variant(Integer, "sqlite"), Sequence('REQUEST_GROUP_ID_SEQ', schema=DEFAULT_SCHEMA_NAME), primary_key=True)
+    campaign = Column(String(50), nullable=False, default='Default')
+    campaign_scope = Column(String(SCOPE_LENGTH), nullable=False, default='Default')
+    campaign_group = Column(String(NAME_LENGTH), nullable=False)
+    campaign_tag = Column(String(100), nullable=False)
+    requester = Column(String(20))
+    group_type = Column(EnumWithValue(RequestGroupType), nullable=False)
+    username = Column(String(20))
+    userdn = Column(String(200))
+    priority = Column(Integer())
+    status = Column(EnumWithValue(RequestGroupStatus), nullable=False)
+    substatus = Column(EnumWithValue(RequestGroupStatus), default=0)
+    oldstatus = Column(EnumWithValue(RequestGroupStatus), default=0)
+    locking = Column(EnumWithValue(RequestGroupLocking), nullable=False)
+    total_requests = Column(Integer())
+    finished_requests = Column(Integer())
+    subfinished_requests = Column(Integer())
+    failed_requests = Column(Integer())
+    processing_requests = Column(Integer())
+    new_requests = Column(Integer())
+    max_processing_requests = Column(Integer())
+    created_at = Column("created_at", DateTime, default=datetime.datetime.utcnow, nullable=False)
+    updated_at = Column("updated_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
+    next_poll_at = Column("next_poll_at", DateTime, default=datetime.datetime.utcnow)
+    accessed_at = Column("accessed_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    expired_at = Column("expired_at", DateTime)
+    new_retries = Column(Integer(), default=0)
+    update_retries = Column(Integer(), default=0)
+    max_new_retries = Column(Integer(), default=3)
+    max_update_retries = Column(Integer(), default=0)
+    new_poll_period = Column(Interval(), default=datetime.timedelta(seconds=1))
+    update_poll_period = Column(Interval(), default=datetime.timedelta(seconds=10))
+    cloud = Column(String(50))
+    site = Column(String(50))
+    queue = Column(String(50))
+    locking_hostname = Column(String(50))
+    locking_pid = Column(BigInteger, autoincrement=False)
+    locking_thread_id = Column(BigInteger, autoincrement=False)
+    locking_thread_name = Column(String(100))
+    errors = Column(JSONString(1024))
+    group_metadata = Column('group_metadata', JSON())
+    processing_metadata = Column('processing_metadata', JSON())
+
+    __table_args__ = (PrimaryKeyConstraint('group_id', name='REQUESTGROUP_PK'),
+                      CheckConstraint('status IS NOT NULL', name='REQUESTGROUP_STATUS_ID_NN'),
+                      UniqueConstraint('campaign', 'campaign_scope', 'campaign_group', 'campaign_tag', name='REQUESTGROUP_CM_UQ'),
+                      Index('REQUESTGROUP_CM_NAME_IDX', 'campaign', 'campaign_scope', 'campaign_group', 'campaign_tag'),
+                      Index('REQUESTGROUP_STATUS_SITE', 'status', 'site', 'group_id'),
+                      Index('REQUESTGROUP_STATUS_PRIO_IDX', 'status', 'priority', 'group_id', 'locking', 'updated_at', 'next_poll_at', 'created_at'),
+                      Index('REQUESTGROUP_STATUS_POLL_IDX', 'status', 'priority', 'locking', 'updated_at', 'new_poll_period', 'update_poll_period', 'created_at', 'group_id'))
+
+
 class Request(BASE, ModelBase):
     """Represents a pre-cache request from other service"""
     __tablename__ = 'requests'
@@ -143,11 +199,18 @@ class Request(BASE, ModelBase):
     userdn = Column(String(200))
     transform_tag = Column(String(20))
     workload_id = Column(Integer())
+    group_id = Column(BigInteger())
     priority = Column(Integer())
     status = Column(EnumWithValue(RequestStatus), nullable=False)
     substatus = Column(EnumWithValue(RequestStatus), default=0)
     oldstatus = Column(EnumWithValue(RequestStatus), default=0)
     locking = Column(EnumWithValue(RequestLocking), nullable=False)
+    command = Column(EnumWithValue(CommandType), default=0)
+    total_transforms = Column(Integer())
+    finished_transforms = Column(Integer())
+    subfinished_transforms = Column(Integer())
+    failed_transforms = Column(Integer())
+    processing_transforms = Column(Integer())
     created_at = Column("created_at", DateTime, default=datetime.datetime.utcnow, nullable=False)
     updated_at = Column("updated_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
     next_poll_at = Column("next_poll_at", DateTime, default=datetime.datetime.utcnow)
@@ -159,7 +222,18 @@ class Request(BASE, ModelBase):
     max_update_retries = Column(Integer(), default=0)
     new_poll_period = Column(Interval(), default=datetime.timedelta(seconds=1))
     update_poll_period = Column(Interval(), default=datetime.timedelta(seconds=10))
+    additional_data_storage = Column(String(512))
+    cloud = Column(String(50))
     site = Column(String(50))
+    queue = Column(String(50))
+    locking_hostname = Column(String(50))
+    locking_pid = Column(BigInteger, autoincrement=False)
+    locking_thread_id = Column(BigInteger, autoincrement=False)
+    locking_thread_name = Column(String(100))
+    campaign = Column(String(50))
+    campaign_scope = Column(String(SCOPE_LENGTH), nullable=False, default='Default')
+    campaign_group = Column(String(NAME_LENGTH))
+    campaign_tag = Column(String(100))
     errors = Column(JSONString(1024))
     _request_metadata = Column('request_metadata', JSON())
     _processing_metadata = Column('processing_metadata', JSON())
@@ -242,6 +316,7 @@ class Request(BASE, ModelBase):
 
     __table_args__ = (PrimaryKeyConstraint('request_id', name='REQUESTS_PK'),
                       CheckConstraint('status IS NOT NULL', name='REQUESTS_STATUS_ID_NN'),
+                      ForeignKeyConstraint(['group_id'], ['requests_group.group_id'], name='REQUESTS_GROUP_ID_FK'),
                       # UniqueConstraint('name', 'scope', 'requester', 'request_type', 'transform_tag', 'workload_id', name='REQUESTS_NAME_SCOPE_UQ '),
                       Index('REQUESTS_SCOPE_NAME_IDX', 'name', 'scope', 'workload_id'),
                       Index('REQUESTS_STATUS_SITE', 'status', 'site', 'request_id'),
@@ -290,13 +365,19 @@ class Transform(BASE, ModelBase):
     workload_id = Column(Integer())
     transform_type = Column(EnumWithValue(TransformType), nullable=False)
     transform_tag = Column(String(20))
+    internal_id = Column(String(20))
     priority = Column(Integer())
     safe2get_output_from_input = Column(Integer())
     status = Column(EnumWithValue(TransformStatus), nullable=False)
     substatus = Column(EnumWithValue(TransformStatus), default=0)
     oldstatus = Column(EnumWithValue(TransformStatus), default=0)
     locking = Column(EnumWithValue(TransformLocking), nullable=False)
+    command = Column(EnumWithValue(CommandType), default=0)
     retries = Column(Integer(), default=0)
+    parent_internal_id = Column(String(400))
+    parent_transform_id = Column(BigInteger())
+    previous_transform_id = Column(BigInteger())
+    current_processing_id = Column(BigInteger())
     created_at = Column("created_at", DateTime, default=datetime.datetime.utcnow, nullable=False)
     updated_at = Column("updated_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
     next_poll_at = Column("next_poll_at", DateTime, default=datetime.datetime.utcnow)
@@ -310,7 +391,16 @@ class Transform(BASE, ModelBase):
     new_poll_period = Column(Interval(), default=datetime.timedelta(seconds=1))
     update_poll_period = Column(Interval(), default=datetime.timedelta(seconds=10))
     site = Column(String(50))
+    locking_hostname = Column(String(50))
+    locking_pid = Column(BigInteger, autoincrement=False)
+    locking_thread_id = Column(BigInteger, autoincrement=False)
+    locking_thread_name = Column(String(100))
     name = Column(String(NAME_LENGTH))
+    has_previous_conditions = Column(Integer())
+    loop_index = Column(Integer())
+    cloned_from = Column(BigInteger())
+    triggered_conditions = Column('triggered_conditions', JSON())
+    untriggered_conditions = Column('untriggered_conditions', JSON())
     errors = Column(JSONString(1024))
     _transform_metadata = Column('transform_metadata', JSON())
     _running_metadata = Column('running_metadata', JSON())
@@ -370,6 +460,7 @@ class Transform(BASE, ModelBase):
 
     __table_args__ = (PrimaryKeyConstraint('transform_id', name='TRANSFORMS_PK'),
                       CheckConstraint('status IS NOT NULL', name='TRANSFORMS_STATUS_ID_NN'),
+                      UniqueConstraint('request_id', 'name', name='TRANSFORMS_NAME_UQ'),
                       Index('TRANSFORMS_TYPE_TAG_IDX', 'transform_type', 'transform_tag', 'transform_id'),
                       Index('TRANSFORMS_STATUS_UPDATED_AT_IDX', 'status', 'locking', 'updated_at', 'next_poll_at', 'created_at'),
                       Index('TRANSFORMS_REQ_IDX', 'request_id', 'transform_id'),
@@ -395,14 +486,20 @@ class Processing(BASE, ModelBase):
     transform_id = Column(BigInteger().with_variant(Integer, "sqlite"), nullable=False)
     request_id = Column(BigInteger().with_variant(Integer, "sqlite"), nullable=False)
     workload_id = Column(Integer())
+    processing_type = Column(EnumWithValue(ProcessingType), nullable=False)
     status = Column(EnumWithValue(ProcessingStatus), nullable=False)
     substatus = Column(EnumWithValue(ProcessingStatus), default=0)
     oldstatus = Column(EnumWithValue(ProcessingStatus), default=0)
+    loop_index = Column(Integer())
+    internal_id = Column(String(20))
+    parent_internal_id = Column(String(400))
     locking = Column(EnumWithValue(ProcessingLocking), nullable=False)
+    command = Column(EnumWithValue(CommandType), default=0)
     submitter = Column(String(20))
     submitted_id = Column(Integer())
     granularity = Column(Integer())
     granularity_type = Column(EnumWithValue(GranularityType))
+    num_unmapped = Column(Integer(), default=0)
     created_at = Column("created_at", DateTime, default=datetime.datetime.utcnow, nullable=False)
     updated_at = Column("updated_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
     next_poll_at = Column("next_poll_at", DateTime, default=datetime.datetime.utcnow)
@@ -417,6 +514,10 @@ class Processing(BASE, ModelBase):
     new_poll_period = Column(Interval(), default=datetime.timedelta(seconds=1))
     update_poll_period = Column(Interval(), default=datetime.timedelta(seconds=10))
     site = Column(String(50))
+    locking_hostname = Column(String(50))
+    locking_pid = Column(BigInteger, autoincrement=False)
+    locking_thread_id = Column(BigInteger, autoincrement=False)
+    locking_thread_name = Column(String(100))
     errors = Column(JSONString(1024))
     _processing_metadata = Column('processing_metadata', JSON())
     _running_metadata = Column('running_metadata', JSON())
@@ -477,6 +578,7 @@ class Processing(BASE, ModelBase):
 
     __table_args__ = (PrimaryKeyConstraint('processing_id', name='PROCESSINGS_PK'),
                       ForeignKeyConstraint(['transform_id'], ['transforms.transform_id'], name='PROCESSINGS_TRANSFORM_ID_FK'),
+                      UniqueConstraint('request_id', 'transform_id', name='PROCESSINGS_ID_UQ'),
                       CheckConstraint('status IS NOT NULL', name='PROCESSINGS_STATUS_ID_NN'),
                       CheckConstraint('transform_id IS NOT NULL', name='PROCESSINGS_TRANSFORM_ID_NN'),
                       Index('PROCESSINGS_STATUS_SITE', 'status', 'site', 'request_id', 'transform_id', 'processing_id'),
@@ -503,6 +605,8 @@ class Collection(BASE, ModelBase):
     storage_id = Column(Integer())
     new_files = Column(Integer())
     processed_files = Column(Integer())
+    preprocessing_files = Column(Integer())
+    activated_files = Column(Integer())
     processing_files = Column(Integer())
     failed_files = Column(Integer())
     missing_files = Column(Integer())
@@ -544,8 +648,8 @@ class Content(BASE, ModelBase):
     content_dep_id = Column(BigInteger())
     scope = Column(String(SCOPE_LENGTH))
     name = Column(String(LONG_NAME_LENGTH))
-    name_md5 = Column(String(String(33)))
-    scope_name_md5 = Column(String(String(33)))
+    name_md5 = Column(String(33))
+    scope_name_md5 = Column(String(33))
     min_id = Column(Integer(), default=0)
     max_id = Column(Integer(), default=0)
     content_type = Column(EnumWithValue(ContentType), nullable=False)
@@ -568,7 +672,7 @@ class Content(BASE, ModelBase):
     updated_at = Column("updated_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     accessed_at = Column("accessed_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     expired_at = Column("expired_at", DateTime)
-    content_metadata = Column(JSONString(100))
+    content_metadata = Column(JSONString(1000))
 
     __table_args__ = (PrimaryKeyConstraint('content_id', name='CONTENTS_PK'),
                       # UniqueConstraint('name', 'scope', 'coll_id', 'content_type', 'min_id', 'max_id', name='CONTENT_SCOPE_NAME_UQ'),
@@ -585,7 +689,8 @@ class Content(BASE, ModelBase):
                       Index('CONTENTS_DEP_IDX', 'request_id', 'transform_id', 'content_dep_id'),
                       Index('CONTENTS_REL_IDX', 'request_id', 'content_relation_type', 'transform_id', 'substatus'),
                       Index('CONTENTS_TF_IDX', 'transform_id', 'request_id', 'coll_id', 'map_id', 'content_relation_type'),
-                      Index('CONTENTS_REQ_TF_COLL_IDX', 'request_id', 'transform_id', 'workload_id', 'coll_id', 'content_relation_type', 'status', 'substatus'))
+                      Index('CONTENTS_REQ_TF_COLL_IDX', 'request_id', 'transform_id', 'workload_id', 'coll_id', 'content_relation_type', 'status', 'substatus'),
+                      Index('CONTENTS_REQ_TF_DEP_ID', 'content_dep_id', 'request_id', 'transform_id'))
 
 
 class Content_update(BASE, ModelBase):
@@ -666,14 +771,14 @@ class Content_ext(BASE, ModelBase):
     req_id = Column(BigInteger())
     jedi_task_id = Column(BigInteger())
     actual_core_count = Column(Integer())
-    max_rss = Column(Integer())
-    max_vmem = Column(Integer())
-    max_swap = Column(Integer())
-    max_pss = Column(Integer())
-    avg_rss = Column(Integer())
-    avg_vmem = Column(Integer())
-    avg_swap = Column(Integer())
-    avg_pss = Column(Integer())
+    max_rss = Column(BigInteger())
+    max_vmem = Column(BigInteger())
+    max_swap = Column(BigInteger())
+    max_pss = Column(BigInteger())
+    avg_rss = Column(BigInteger())
+    avg_vmem = Column(BigInteger())
+    avg_swap = Column(BigInteger())
+    avg_pss = Column(BigInteger())
     max_walltime = Column(Integer())
     disk_io = Column(Integer())
     failed_attempt = Column(Integer())
@@ -701,7 +806,7 @@ class Health(BASE, ModelBase):
     status = Column(EnumWithValue(HealthStatus), default=0, nullable=False)
     thread_id = Column(BigInteger, autoincrement=False)
     thread_name = Column(String(255))
-    payload = Column(String(2048))
+    # payload = Column(String(2048))
     created_at = Column("created_at", DateTime, default=datetime.datetime.utcnow)
     updated_at = Column("updated_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     payload = Column(String(2048))
@@ -725,6 +830,7 @@ class Message(BASE, ModelBase):
     workload_id = Column(Integer())
     transform_id = Column(Integer())
     processing_id = Column(Integer())
+    internal_id = Column(String(20))
     num_contents = Column(Integer())
     retries = Column(Integer(), default=0)
     fetching_id = Column(Integer())
@@ -902,9 +1008,11 @@ class EventArchive(BASE, ModelBase):
 
 
 class Throttler(BASE, ModelBase):
-    """Represents the operations events"""
+    """Represents the throttlers"""
     __tablename__ = 'throttlers'
-    throttler_id = Column(BigInteger(), primary_key=True)
+    throttler_id = Column(BigInteger().with_variant(Integer, "sqlite"),
+                          Sequence('THROTTLER_ID_SEQ', schema=DEFAULT_SCHEMA_NAME),
+                          primary_key=True)
     site = Column(String(50), nullable=False)
     status = Column(EnumWithValue(ThrottlerStatus), nullable=False)
     num_requests = Column(Integer())
@@ -918,6 +1026,48 @@ class Throttler(BASE, ModelBase):
 
     __table_args__ = (PrimaryKeyConstraint('throttler_id', name='THROTTLER_PK'),
                       UniqueConstraint('site', name='THROTTLER_SITE_UQ'))
+
+
+class MetaInfo(BASE, ModelBase):
+    """Represents the meta infos"""
+    __tablename__ = 'meta_info'
+    meta_id = Column(BigInteger().with_variant(Integer, "sqlite"),
+                     Sequence('METAINFO_ID_SEQ', schema=DEFAULT_SCHEMA_NAME),
+                     primary_key=True)
+    name = Column(String(50), nullable=False)
+    status = Column(EnumWithValue(MetaStatus), nullable=False)
+    created_at = Column("created_at", DateTime, default=datetime.datetime.utcnow, nullable=False)
+    updated_at = Column("updated_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
+    description = Column(String(1000), nullable=True)
+    meta_info = Column(JSON())
+
+    __table_args__ = (PrimaryKeyConstraint('meta_id', name='METAINFO_PK'),
+                      UniqueConstraint('name', name='METAINFO_NAME_UQ'))
+
+
+class Condition(BASE, ModelBase):
+    """Represents the conditions"""
+    __tablename__ = 'conditions'
+    condition_id = Column(BigInteger().with_variant(Integer, "sqlite"),
+                          Sequence('CONDITION_ID_SEQ', schema=DEFAULT_SCHEMA_NAME),
+                          primary_key=True)
+    request_id = Column(BigInteger().with_variant(Integer, "sqlite"), nullable=False)
+    internal_id = Column(String(20))
+    name = Column(String(250))
+    status = Column(EnumWithValue(CommandStatus), nullable=False)
+    substatus = Column(Integer())
+    is_loop = Column(Integer())
+    loop_index = Column(Integer())
+    cloned_from = Column(BigInteger().with_variant(Integer, "sqlite"))
+    created_at = Column("created_at", DateTime, default=datetime.datetime.utcnow, nullable=False)
+    updated_at = Column("updated_at", DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
+    evaluate_result = Column(String(1000))
+    previous_transforms = Column(JSON())
+    following_transforms = Column(JSON())
+    condition = Column("condition", JSON())
+
+    __table_args__ = (PrimaryKeyConstraint('condition_id', name='CONDITION_PK'),
+                      UniqueConstraint('request_id', 'internal_id', name='CONDITION_ID_UQ'))
 
 
 def create_trigger():
@@ -1050,13 +1200,20 @@ def drop_proc_to_update_contents():
     event.listen(Content.__table__, "before_drop", func.execute_if(dialect="postgresql"))
 
 
+def get_request_sequence():
+    seq = Sequence('REQUEST_ID_SEQ', schema=DEFAULT_SCHEMA_NAME, metadata=Request.metadata)
+    # return seq.next_value().scalar()
+    # return seq.next_value()
+    return seq
+
+
 def register_models(engine):
     """
     Creates database tables for all models with the given engine
     """
 
     # models = (Request, Workprogress, Transform, Workprogress2transform, Processing, Collection, Content, Health, Message)
-    models = (Request, Transform, Processing, Collection, Content, Content_update, Content_ext, Health, Message, Command, Throttler)
+    models = (Request, Transform, Processing, Collection, Content, Content_update, Content_ext, Health, Message, Command, Throttler, MetaInfo, Condition)
 
     create_proc_to_update_contents()
 
@@ -1071,7 +1228,7 @@ def unregister_models(engine):
     """
 
     # models = (Request, Workprogress, Transform, Workprogress2transform, Processing, Collection, Content, Health, Message)
-    models = (Request, Transform, Processing, Collection, Content, Content_update, Content_ext, Health, Message, Command, Throttler)
+    models = (Request, Transform, Processing, Collection, Content, Content_update, Content_ext, Health, Message, Command, Throttler, MetaInfo, Condition)
 
     drop_proc_to_update_contents()
 

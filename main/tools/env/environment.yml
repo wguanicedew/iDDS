@@ -1,19 +1,19 @@
 name: iDDS
 dependencies:
-- python==3.9.7 
+- python==3.9.7
 - pip
 - pip:
   - argcomplete
   - requests                         # requests
-  - SQLAlchemy==1.4.46               # db orm, SQLAlchemy 2.0 has been deployed. Howerever it crashed iDDS.
+  - SQLAlchemy                       # db orm, SQLAlchemy 2.0 has been deployed. Howerever it crashed iDDS.
   - urllib3                          # url connections
   - retrying                         # retrying behavior
   # - mysqlclient                      # mysql python client
   - mod_wsgi                         # apache wsgi module
   - flask                            # web service
-  - futures                          # multiple process/threads
   - stomp.py                         # Messaging broker client
   - cx-Oracle                        # Oralce client
+  - oracledb
   - unittest2                        # unit test tool
   - pep8                             # checks for PEP8 code style compliance
   - flake8                           # Wrapper around PyFlakes&pep8
@@ -31,7 +31,4 @@ dependencies:
   - deepdiff
   - pyzmq
   - oic
-  - lsst-ctrl-bps
-  - idds-common==0.11.5
-  - idds-workflow==0.11.5
-  - idds-client==0.11.5
+  - cachetools

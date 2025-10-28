@@ -6,19 +6,61 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2021
+# - Wen Guan, <wen.guan@cern.ch>, 2021 - 2025
 
 
 import glob
+import logging
 import io
 import os
 import re
 import sys
 import shutil
 import socket
-from distutils.sysconfig import get_python_lib
-from setuptools import setup, find_packages, Distribution
+import sysconfig
+from setuptools import setup, find_packages
 from setuptools.command.install import install
+from wheel.bdist_wheel import bdist_wheel
+
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+EXCLUDED_PACKAGE = ["idds"]
+
+
+class CustomInstallCommand(install):
+    """Custom install command to exclude top-level 'idds' during installation."""
+    def run(self):
+        # Remove 'idds' from the list of packages before installation
+        logger.info("idds-atlas installing")
+        logger.info(f"self.distribution.packages: {self.distribution.packages}")
+        self.distribution.packages = [
+            pkg for pkg in self.distribution.packages if pkg not in EXCLUDED_PACKAGE
+        ]
+        logger.info(f"self.distribution.packages: {self.distribution.packages}")
+        super().run()
+
+
+class CustomBdistWheel(bdist_wheel):
+    """Custom wheel builder to exclude the 'idds' package but keep subpackages."""
+    def finalize_options(self):
+        # Exclude only the top-level 'idds', not its subpackages
+        logger.info("idds-workflow wheel installing")
+        logger.info(f"self.distribution.packages: {self.distribution.packages}")
+        included_packages = [
+            pkg for pkg in find_packages('lib/')
+            if pkg not in EXCLUDED_PACKAGE
+        ]
+        self.distribution.packages = included_packages
+        logger.info(f"self.distribution.packages: {self.distribution.packages}")
+        super().finalize_options()
+
+    def run(self):
+        logger.info("CustomBdistWheel is running!")  # Debug print
+        super().run()
 
 
 current_dir = os.getcwd()
@@ -34,20 +76,12 @@ with io.open('README.md', "rt", encoding="utf8") as f:
     readme = f.read()
 
 
-class OnlyGetScriptPath(install):
-    def run(self):
-        self.distribution.install_scripts = self.install_scripts
+def get_python_lib():
+    return sysconfig.get_paths()["purelib"]
 
 
 def get_python_bin_path():
-    " Get the directory setuptools installs scripts to for current python "
-    dist = Distribution({'cmdclass': {'install': OnlyGetScriptPath}})
-    dist.dry_run = True  # not sure if necessary
-    dist.parse_config_files()
-    command = dist.get_command_obj('install')
-    command.ensure_finalized()
-    command.run()
-    return dist.install_scripts
+    return sysconfig.get_paths()["scripts"]
 
 
 def get_python_home():
@@ -55,7 +89,7 @@ def get_python_home():
 
 
 def get_data_path():
-    return sys.prefix
+    return sysconfig.get_paths()["data"]
 
 
 def get_reqs_from_file(requirements_file):
@@ -128,18 +162,18 @@ install_bin_path = get_python_bin_path()
 install_home_path = get_python_home()
 install_data_path = get_data_path()
 
-requirements_files = ['tools/env/environment.yml']
+requirements_files = ['tools/monitor/env/environment.yml']
 install_requires = parse_requirements(requirements_files=requirements_files)
 install_requires = install_requires
 
 hostname = get_full_hostname()
-config_api_host(conf_file_template="data/conf.js.template", conf_file='data/conf.js', hostname=hostname)
+# config_api_host(conf_file_template="data/conf.js.template", conf_file='data/conf.js', hostname=hostname)
 
 data_files = [
     # config and cron files
     ('etc/idds/', glob.glob('etc/idds/*.template')),
     ('etc/idds/rest', glob.glob('etc/idds/rest/*template')),
-    ('tools/env/', glob.glob('tools/env/*.yml')),
+    ('tools/monitor/env/', glob.glob('tools/monitor/env/*.yml')),
     # ('monitor/', glob.glob('*', recursive=True))
     # ('monitor/', get_all_files('.')),
 ]
@@ -163,6 +197,10 @@ setup(
     include_package_data=True,
     data_files=data_files,
     scripts=scripts,
+    cmdclass={
+        'install': CustomInstallCommand,  # Exclude 'idds' during installation
+        'bdist_wheel': CustomBdistWheel,
+    },
     project_urls={
         'Documentation': 'https://github.com/HSF/iDDS/wiki',
         'Source': 'https://github.com/HSF/iDDS',

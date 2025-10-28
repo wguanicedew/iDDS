@@ -23,7 +23,7 @@ from retrying import retry
 from threading import Lock
 from os.path import basename
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, select
 from sqlalchemy.exc import DatabaseError, DisconnectionError, OperationalError, TimeoutError
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
@@ -143,6 +143,8 @@ def get_engine(echo=True):
             except:  # noqa: B901
                 pass
         params['execution_options'] = {'schema_translate_map': {None: DEFAULT_SCHEMA_NAME}}
+        if 'oracledb' in sql_connection:
+            params['thick_mode'] = True
         _ENGINE = create_engine(sql_connection, **params)
 
         if 'mysql' in sql_connection:
@@ -227,6 +229,12 @@ def retry_if_db_connection_error(exception):
                           'ORA-25408',)  # can not safely replay call
         for err_code in conn_err_codes:
             if exception.args[0].find(err_code) != -1:
+                return True
+    if isinstance(exception, DatabaseException):
+        conn_err_codes = ('server closed the connection unexpectedly',
+                          'closed the connection',)
+        for err_code in conn_err_codes:
+            if str(exception.args[0]).find(err_code) != -1:
                 return True
     return False
 
@@ -358,3 +366,43 @@ def transactional_session(function):
         return result
     new_funct.__doc__ = function.__doc__
     return new_funct
+
+
+def safe_bulk_update_mappings(session, model, mappings):
+    if not mappings:
+        return
+
+    # detect the primary key column name(s)
+    mapper = inspect(model)
+    pk_cols = [col.name for col in mapper.primary_key]
+
+    if len(pk_cols) != 1:
+        # raise ValueError("safe_bulk_update only supports single-column primary keys")
+        return session.bulk_update_mappings(model, mappings)
+
+    pk = pk_cols[0]
+
+    # extract ids from mappings
+    ids = [m[pk] for m in mappings if pk in m]
+
+    if not ids:
+        return
+
+    # claim only rows that are not locked
+    stmt = (
+        select(getattr(model, pk))
+        .where(getattr(model, pk).in_(ids))
+        .with_for_update(skip_locked=True)
+    )
+    claimed = session.execute(stmt).scalars().all()
+
+    if not claimed:
+        return
+
+    claimed_set = set(claimed)
+
+    # filter mappings to only claimed rows
+    filtered = [m for m in mappings if m.get(pk) in claimed_set]
+
+    if filtered:
+        return session.bulk_update_mappings(model, filtered)

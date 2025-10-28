@@ -6,7 +6,7 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2020
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2024
 
 
 """
@@ -285,10 +285,6 @@ def get_collections(scope=None, name=None, request_id=None, workload_id=None, tr
             transform_id = [transform_id]
 
         query = session.query(models.Collection)
-        if scope:
-            query = query.filter(models.Collection.scope == scope)
-        if name:
-            query = query.filter(models.Collection.name.like(name.replace('*', '%')))
         if request_id:
             query = query.filter(models.Collection.request_id == request_id)
         if workload_id:
@@ -297,6 +293,11 @@ def get_collections(scope=None, name=None, request_id=None, workload_id=None, tr
             query = query.filter(models.Collection.transform_id.in_(transform_id))
         if relation_type is not None:
             query = query.filter(models.Collection.relation_type == relation_type)
+
+        if scope:
+            query = query.filter(models.Collection.scope == scope)
+        if name:
+            query = query.filter(models.Collection.name.like(name.replace('*', '%')))
 
         query = query.order_by(asc(models.Collection.updated_at))
 
@@ -329,10 +330,13 @@ def get_collections_by_request_ids(request_ids, session=None):
         if request_ids and type(request_ids) not in (list, tuple):
             request_ids = [request_ids]
 
-        query = session.query(models.Collection.coll_id,
-                              models.Collection.request_id,
-                              models.Collection.transform_id,
-                              models.Collection.workload_id)
+        columns = [models.Collection.coll_id,
+                   models.Collection.request_id,
+                   models.Collection.transform_id,
+                   models.Collection.workload_id]
+        column_names = [column.name for column in columns]
+        query = session.query(*columns)
+
         if request_ids:
             query = query.filter(models.Collection.request_id.in_(request_ids))
 
@@ -341,7 +345,7 @@ def get_collections_by_request_ids(request_ids, session=None):
         if tmp:
             for t in tmp:
                 # rets.append(t.to_dict())
-                t2 = dict(zip(t.keys(), t))
+                t2 = dict(zip(column_names, t))
                 rets.append(t2)
         return rets
     except Exception as error:

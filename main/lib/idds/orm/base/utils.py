@@ -39,13 +39,15 @@ def build_database(echo=True, tests=False):
 
     if config_has_option('database', 'schema'):
         schema = config_get('database', 'schema')
-        if schema and not engine.dialect.has_schema(engine, schema):
+        if schema:
             print('Schema set in config, trying to create schema:', schema)
             try:
-                engine.execute(CreateSchema(schema))
+                with engine.connect() as conn:
+                    with conn.begin():
+                        conn.execute(CreateSchema(schema))
             except Exception as e:
                 print('Cannot create schema, please validate manually if schema creation is needed, continuing:', e)
-                print(traceback.format_exc())
+                # print(traceback.format_exc())
 
     models.register_models(engine)
 
@@ -125,6 +127,8 @@ def destroy_everything(echo=True):
 def dump_schema():
     """ Creates a schema dump to a specific database. """
     engine = session.get_dump_engine()
+    models.unregister_models(engine)
+    print("\n")
     models.register_models(engine)
 
 

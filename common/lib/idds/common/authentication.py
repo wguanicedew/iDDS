@@ -11,7 +11,6 @@
 import datetime
 import base64
 import json
-import jwt
 import os
 import re
 import requests
@@ -31,12 +30,7 @@ except ImportError:
     from urllib.parse import urlencode
     raw_input = input
 
-# from cryptography import x509
-from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
-
-# from idds.common import exceptions
+from idds.common import exceptions
 from idds.common.constants import HTTP_STATUS_CODE
 
 
@@ -163,7 +157,7 @@ class OIDCAuthentication(BaseAuthentication):
             r = requests.get(url, allow_redirects=True, verify=should_verify(no_verify, self.get_ssl_verify()))
             return r.content
         except Exception as error:
-            return False, 'Failed to get http content for %s: %s' (str(url), str(error))
+            return False, 'Failed to get http content for %s: %s' % (str(url), str(error))
 
     def get_endpoint_config(self, auth_config):
         content = self.get_http_content(auth_config['oidc_config_url'], no_verify=auth_config['no_verify'])
@@ -285,58 +279,10 @@ class OIDCAuthentication(BaseAuthentication):
             return False, 'Failed to refresh oidc token: ' + str(error)
 
     def get_public_key(self, token, jwks_uri, no_verify=False):
-        headers = jwt.get_unverified_header(token)
-        if headers is None or 'kid' not in headers:
-            raise jwt.exceptions.InvalidTokenError('cannot extract kid from headers')
-        kid = headers['kid']
-
-        jwks = self.get_cache_value(jwks_uri)
-        if not jwks:
-            jwks_content = self.get_http_content(jwks_uri, no_verify=no_verify)
-            jwks = json.loads(jwks_content)
-            self.set_cache_value(jwks_uri, jwks)
-
-        jwk = None
-        for j in jwks.get('keys', []):
-            if j.get('kid') == kid:
-                jwk = j
-        if jwk is None:
-            raise jwt.exceptions.InvalidTokenError('JWK not found for kid={0}: {1}'.format(kid, str(jwks)))
-
-        public_num = RSAPublicNumbers(n=decode_value(jwk['n']), e=decode_value(jwk['e']))
-        public_key = public_num.public_key(default_backend())
-        pem = public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
-        return pem
+        raise exceptions.NotImplementedException("Method get_public_key is not implemented.")
 
     def verify_id_token(self, vo, token):
-        try:
-            auth_config, endpoint_config = self.get_auth_endpoint_config(vo)
-
-            # check audience
-            decoded_token = jwt.decode(token, verify=False, options={"verify_signature": False})
-            audience = decoded_token['aud']
-            if audience not in [auth_config['audience'], auth_config['client_id']]:
-                # discovery_endpoint = auth_config['oidc_config_url']
-                return False, "The audience %s of the token doesn't match vo configuration(client_id: %s)." % (audience, auth_config['client_id']), None
-
-            public_key = self.get_public_key(token, endpoint_config['jwks_uri'], no_verify=auth_config['no_verify'])
-            # decode token only with RS256
-            if 'iss' in decoded_token and decoded_token['iss'] and decoded_token['iss'] != endpoint_config['issuer'] and endpoint_config['issuer'].startswith(decoded_token['iss']):
-                # iss is missing the last '/' in access tokens
-                issuer = decoded_token['iss']
-            else:
-                issuer = endpoint_config['issuer']
-
-            decoded = jwt.decode(token, public_key, verify=True, algorithms='RS256',
-                                 audience=audience, issuer=issuer)
-            decoded['vo'] = vo
-            if 'name' in decoded:
-                username = decoded['name']
-            else:
-                username = None
-            return True, decoded, username
-        except Exception as error:
-            return False, 'Failed to verify oidc token: ' + str(error), None
+        raise exceptions.NotImplementedException("Method verify_id_token is not implemented.")
 
     def setup_oidc_client_token(self, issuer, client_id, client_secret, scope, audience):
         try:
@@ -472,15 +418,15 @@ class X509Authentication(BaseAuthentication):
 # "/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=wguan/CN=667815/CN=Wen Guan/CN=1883443395"
 def get_user_name_from_dn1(dn):
     try:
-        up = re.compile('/(DC|O|OU|C|L)=[^\/]+')        # noqa W605
+        up = re.compile(r'/(DC|O|OU|C|L)=[^\/]+')        # noqa W605
         username = up.sub('', dn)
-        up2 = re.compile('/CN=[0-9]+')
+        up2 = re.compile(r'/CN=[0-9]+')
         username = up2.sub('', username)
-        up2 = re.compile('/CN=[0-9]+')
+        up2 = re.compile(r'/CN=[0-9]+')
         username = up2.sub('', username)
-        up3 = re.compile(' [0-9]+')
+        up3 = re.compile(r' [0-9]+')
         username = up3.sub('', username)
-        up4 = re.compile('_[0-9]+')
+        up4 = re.compile(r'_[0-9]+')
         username = up4.sub('', username)
         username = username.replace('/CN=proxy', '')
         username = username.replace('/CN=limited proxy', '')
@@ -488,7 +434,7 @@ def get_user_name_from_dn1(dn):
         username = re.sub('/CN=Robot:[^/]+', '', username)
         username = re.sub('/CN=Robot[^/]+', '', username)
         username = re.sub('/CN=nickname:[^/]+', '', username)
-        pat = re.compile('.*/CN=([^\/]+)/CN=([^\/]+)')         # noqa W605
+        pat = re.compile(r'.*/CN=([^\/]+)/CN=([^\/]+)')         # noqa W605
         mat = pat.match(username)
         if mat:
             username = mat.group(2)
@@ -496,7 +442,7 @@ def get_user_name_from_dn1(dn):
             username = username.replace('/CN=', '')
         if username.lower().find('/email') > 0:
             username = username[:username.lower().find('/email')]
-        pat = re.compile('.*(limited.*proxy).*')
+        pat = re.compile(r'.*(limited.*proxy).*')
         mat = pat.match(username)
         if mat:
             username = mat.group(1)
@@ -511,15 +457,15 @@ def get_user_name_from_dn1(dn):
 # 'CN=203633261,CN=Wen Guan,CN=667815,CN=wguan,OU=Users,OU=Organic Units,DC=cern,DC=ch'
 def get_user_name_from_dn2(dn):
     try:
-        up = re.compile(',(DC|O|OU|C|L)=[^\,]+')        # noqa W605
+        up = re.compile(r',(DC|O|OU|C|L)=[^\,]+')        # noqa W605
         username = up.sub('', dn)
-        up2 = re.compile(',CN=[0-9]+')
+        up2 = re.compile(r',CN=[0-9]+')
         username = up2.sub('', username)
-        up2 = re.compile('CN=[0-9]+,')
+        up2 = re.compile(r'CN=[0-9]+,')
         username = up2.sub(',', username)
-        up3 = re.compile(' [0-9]+')
+        up3 = re.compile(r' [0-9]+')
         username = up3.sub('', username)
-        up4 = re.compile('_[0-9]+')
+        up4 = re.compile(r'_[0-9]+')
         username = up4.sub('', username)
         username = username.replace(',CN=proxy', '')
         username = username.replace(',CN=limited proxy', '')
@@ -530,7 +476,7 @@ def get_user_name_from_dn2(dn):
         username = re.sub(',CN=Robot[^/]+', '', username)
         username = re.sub(',CN=nickname:[^/]+,', ',', username)
         username = re.sub(',CN=nickname:[^/]+', '', username)
-        pat = re.compile('.*,CN=([^\,]+),CN=([^\,]+)')         # noqa W605
+        pat = re.compile(r'.*,CN=([^\,]+),CN=([^\,]+)')         # noqa W605
         mat = pat.match(username)
         if mat:
             username = mat.group(1)
@@ -538,7 +484,7 @@ def get_user_name_from_dn2(dn):
             username = username.replace(',CN=', '')
         if username.lower().find(',email') > 0:
             username = username[:username.lower().find(',email')]
-        pat = re.compile('.*(limited.*proxy).*')
+        pat = re.compile(r'.*(limited.*proxy).*')
         mat = pat.match(username)
         if mat:
             username = mat.group(1)

@@ -6,17 +6,36 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019
+# - Wen Guan, <wen.guan@cern.ch>, 2019 - 2025
 
 
 import glob
+import logging
 import io
 import os
 import re
 import sys
-from distutils.sysconfig import get_python_lib
-from setuptools import setup, find_packages, Distribution
+import sysconfig
+from setuptools import setup, find_packages
 from setuptools.command.install import install
+
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class CustomInstallCommand(install):
+    """Custom install command to exclude top-level 'idds' during installation."""
+    def run(self):
+        # Remove 'idds' from the list of packages before installation
+        logger.info("idds-common installing")
+        logger.info(f"self.distribution.packages: {self.distribution.packages}")
+        self.distribution.packages = [
+            pkg for pkg in self.distribution.packages if pkg != 'not'
+        ]
+        logger.info(f"self.distribution.packages: {self.distribution.packages}")
+        super().run()
 
 
 current_dir = os.getcwd()
@@ -32,20 +51,12 @@ with io.open('README.md', "rt", encoding="utf8") as f:
     readme = f.read()
 
 
-class OnlyGetScriptPath(install):
-    def run(self):
-        self.distribution.install_scripts = self.install_scripts
+def get_python_lib():
+    return sysconfig.get_paths()["purelib"]
 
 
 def get_python_bin_path():
-    " Get the directory setuptools installs scripts to for current python "
-    dist = Distribution({'cmdclass': {'install': OnlyGetScriptPath}})
-    dist.dry_run = True  # not sure if necessary
-    dist.parse_config_files()
-    command = dist.get_command_obj('install')
-    command.ensure_finalized()
-    command.run()
-    return dist.install_scripts
+    return sysconfig.get_paths()["scripts"]
 
 
 def get_python_home():
@@ -53,7 +64,7 @@ def get_python_home():
 
 
 def get_data_path():
-    return sys.prefix
+    return sysconfig.get_paths()["data"]
 
 
 def get_reqs_from_file(requirements_file):
@@ -80,7 +91,7 @@ install_bin_path = get_python_bin_path()
 install_home_path = get_python_home()
 install_data_path = get_data_path()
 
-requirements_files = ['tools/env/environment.yml']
+requirements_files = ['tools/common/env/environment.yml']
 install_requires = parse_requirements(requirements_files=requirements_files)
 
 if sys.version_info[0] == 2:
@@ -90,7 +101,7 @@ data_files = [
     # config and cron files
     ('etc/idds/', glob.glob('etc/idds/*.template')),
     ('etc/idds/rest', glob.glob('etc/idds/rest/*template')),
-    ('tools/env/', glob.glob('tools/env/*.yml')),
+    ('tools/common/env/', glob.glob('tools/common/env/*.yml')),
 ]
 scripts = glob.glob('bin/*')
 
@@ -110,6 +121,9 @@ setup(
     include_package_data=True,
     data_files=data_files,
     scripts=scripts,
+    cmdclass={
+        'install': CustomInstallCommand,  # Exclude 'idds' during installation
+    },
     project_urls={
         'Documentation': 'https://github.com/HSF/iDDS/wiki',
         'Source': 'https://github.com/HSF/iDDS',

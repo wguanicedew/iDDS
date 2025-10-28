@@ -1,0 +1,11 @@
+name: idds-client
+dependencies:
+- python==3.6
+- pip
+- pip:
+  - requests                         # requests
+  - urllib3                          # url connections
+  - tabulate
+  - argcomplete
+  - idds-common==2.2.21
+  - idds-workflow==2.2.21

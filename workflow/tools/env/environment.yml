@@ -1,8 +1,0 @@
-name: iDDS
-dependencies:
-- python==3.6
-- pip
-- pip:
-  - anytree
-  - networkx
-  - idds-common==0.11.5
