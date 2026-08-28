@@ -209,7 +209,8 @@ def _build_task_params(ctx):
     idle_timeout = panda_attrs.get("idle_timeout", 120)
     run_id = ctx.get('run_id')
     verbose_flag = " --verbose" if panda_attrs.get('verbose') else ""
-    executable = f"--run_id {run_id} --idle_timeout {idle_timeout}{verbose_flag}"
+    streaming_mode_flag = " --streaming_mode" if panda_attrs.get('streaming_mode') else ""
+    executable = f"--run_id {run_id} --idle_timeout {idle_timeout}{verbose_flag}{streaming_mode_flag}"
     task_params["jobParameters"] = [
         {
             "type": "constant",
