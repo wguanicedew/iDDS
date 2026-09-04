@@ -46,7 +46,7 @@ def _get_active_ejfat_info(logger=None):
             continue
 
         run_id = item['name'][len(EJFAT_NAME_PREFIX):]
-        ejfat[run_id] = {'instance_uri': meta_info.get('instance_uri')}
+        ejfat[run_id] = {'instance_uri': meta_info.get('instance_uri'), 'lifetime': lifetime, 'created_at': created_at}
     return ejfat
 
 
