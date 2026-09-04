@@ -29,11 +29,13 @@ from idds.common.constants import (
     CollectionType,
     CollectionStatus,
     CollectionRelationType,
+    MetaStatus,
 )
 from idds.core import requests as core_requests
 from idds.core import transforms as core_transforms
 from idds.core import catalog as core_catalog
 from idds.core import processings as core_processings
+from idds.core import meta as core_meta
 from idds.orm.base.session import transactional_session
 
 from idds.prompt.handlers.panda import PandaClient
@@ -63,6 +65,8 @@ def _create_workflow_task_records(workflow, session=None):
     memory_per_core = content.get('memory_per_core')
     site = content.get('site')
     panda_attributes = content.get('panda_attributes', {})
+    ejfat_instance_uri = content.get('ejfat_instance_uri')
+    ejfat_lifetime = content.get('ejfat_lifetime')
 
     # workflow_name is the per-scope/campaign name (name without per-run suffix)
     # name format: "<scope>_<transform_tag>_fastprocessing_<site>_<YYYYMMDD>_<run_id>"
@@ -155,6 +159,14 @@ def _create_workflow_task_records(workflow, session=None):
         },
     }
     processing_id = core_processings.add_processing(**processing, session=session)
+
+    if ejfat_instance_uri and run_id is not None:
+        core_meta.add_meta_item(
+            name=f'ejfat_{run_id}',
+            status=MetaStatus.Active,
+            meta_info={'instance_uri': ejfat_instance_uri, 'lifetime': ejfat_lifetime},
+            session=session,
+        )
 
     return {
         'run_id': run_id,

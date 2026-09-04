@@ -254,6 +254,7 @@ def get_prompt_broker_config():
     transformer_broker = None
     transformer_broadcast_broker = None
     result_broker = None
+    ejfat = None
 
     if config_has_section("prompt"):
         if config_has_option("prompt", "transformer_broker"):
