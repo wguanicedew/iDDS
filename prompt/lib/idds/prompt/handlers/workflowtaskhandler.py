@@ -65,6 +65,7 @@ def _create_workflow_task_records(workflow, session=None):
     memory_per_core = content.get('memory_per_core')
     site = content.get('site')
     panda_attributes = content.get('panda_attributes', {})
+    streaming_mode = content.get('streaming_mode', 'activemq')
     ejfat_instance_uri = content.get('ejfat_instance_uri')
     ejfat_lifetime = content.get('ejfat_lifetime')
 
@@ -72,7 +73,8 @@ def _create_workflow_task_records(workflow, session=None):
     # name format: "<scope>_<transform_tag>_fastprocessing_<site>_<YYYYMMDD>_<run_id>"
     # workflow_name: "<scope>_<transform_tag>_fastprocessing_<site>_<YYYYMMDD>"
     if run_id and name and str(run_id) in name:
-        workflow_name = name[: name.rfind('_' + str(run_id))]
+        # workflow_name = name[: name.rfind('_' + str(run_id))]
+        workflow_name = name
     else:
         workflow_name = name
 
@@ -156,6 +158,7 @@ def _create_workflow_task_records(workflow, session=None):
             'site': site,
             'panda_attributes': panda_attributes,
             'run_id': run_id,
+            'streaming_mode': streaming_mode,
         },
     }
     processing_id = core_processings.add_processing(**processing, session=session)
@@ -179,6 +182,7 @@ def _create_workflow_task_records(workflow, session=None):
         'memory_per_core': memory_per_core,
         'site': site,
         'panda_attributes': panda_attributes,
+        'streaming_mode': streaming_mode,
         'request_id': request_id,
         'transform_id': transform_id,
         'processing_id': processing_id,
@@ -220,8 +224,9 @@ def _build_task_params(ctx):
 
     idle_timeout = panda_attrs.get("idle_timeout", 120)
     run_id = ctx.get('run_id')
+    streaming_mode = ctx.get('streaming_mode', 'activemq')
     verbose_flag = " --verbose" if panda_attrs.get('verbose') else ""
-    streaming_mode_flag = " --streaming_mode" if panda_attrs.get('streaming_mode') else ""
+    streaming_mode_flag = " --streaming_mode" if streaming_mode and streaming_mode != 'activemq' else ""
     executable = f"--run_id {run_id} --idle_timeout {idle_timeout}{verbose_flag}{streaming_mode_flag}"
     task_params["jobParameters"] = [
         {
