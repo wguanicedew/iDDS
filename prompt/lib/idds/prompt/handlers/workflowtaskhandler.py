@@ -226,7 +226,7 @@ def _build_task_params(ctx):
     run_id = ctx.get('run_id')
     streaming_mode = ctx.get('streaming_mode', 'activemq')
     verbose_flag = " --verbose" if panda_attrs.get('verbose') else ""
-    streaming_mode_flag = " --streaming_mode" if streaming_mode and streaming_mode != 'activemq' else ""
+    streaming_mode_flag = f" --streaming_mode {streaming_mode}" if streaming_mode and streaming_mode != 'activemq' else ""
     executable = f"--run_id {run_id} --idle_timeout {idle_timeout}{verbose_flag}{streaming_mode_flag}"
     task_params["jobParameters"] = [
         {
