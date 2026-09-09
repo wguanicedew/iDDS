@@ -49,6 +49,7 @@ def _create_workflow_task_records(workflow, session=None):
     """Create all iDDS DB records for a workflow task. Returns a context dict."""
     scope = workflow.get('scope')
     name = workflow.get('name')
+    task_name = workflow.get('task_name', name)
     requester = workflow.get('requester', 'iDDS')
     username = workflow.get('username', 'iDDS')
     transform_tag = workflow.get('transform_tag', 'EIC')
@@ -175,6 +176,7 @@ def _create_workflow_task_records(workflow, session=None):
         'run_id': run_id,
         'scope': scope,
         'name': name,
+        'task_name': task_name,
         'username': username,
         'cloud': cloud,
         'core_count': core_count,
