@@ -195,7 +195,7 @@ def _build_task_params(ctx):
     """Build a PanDA task_params dict from the workflow context."""
     panda_attrs = ctx.get('panda_attributes', {})
     task_params = {
-        'taskName': ctx.get('name'),
+        'taskName': ctx.get('task_name') or ctx.get('name'),
         'vo': panda_attrs.get('vo', 'wlcg'),
         'site': ctx.get('queue') or panda_attrs.get('queue'),
         'PandaSite': ctx.get('site') or panda_attrs.get('site'),
