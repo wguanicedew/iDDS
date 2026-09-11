@@ -45,7 +45,7 @@ setup_logging(__name__)
 
 
 @transactional_session
-def _create_workflow_task_records(workflow, session=None):
+def _create_workflow_task_records(workflow, session=None, logger=None):
     """Create all iDDS DB records for a workflow task. Returns a context dict."""
     scope = workflow.get('scope')
     name = workflow.get('name')
@@ -171,6 +171,11 @@ def _create_workflow_task_records(workflow, session=None):
             meta_info={'instance_uri': ejfat_instance_uri, 'lifetime': ejfat_lifetime},
             session=session,
         )
+        if logger:
+            logger.info(
+                f"_create_workflow_task_records: added meta item ejfat_{run_id} "
+                f"with instance_uri={ejfat_instance_uri}, lifetime={ejfat_lifetime}"
+            )
 
     return {
         'run_id': run_id,
@@ -279,7 +284,7 @@ def create_workflow_task(workflow, logger=None):
     :returns: dict with run_id, request_id, transform_id, processing_id,
               input_coll_id, output_coll_id, workload_id
     """
-    ctx = _create_workflow_task_records(workflow)
+    ctx = _create_workflow_task_records(workflow, logger=logger)
 
     request_id = ctx['request_id']
     transform_id = ctx['transform_id']
