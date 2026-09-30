@@ -22,7 +22,7 @@ from enum import Enum
 from collections import defaultdict
 
 import sqlalchemy
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy import func
 from sqlalchemy.exc import DatabaseError, IntegrityError
 # from sqlalchemy.orm import aliased
@@ -289,7 +289,7 @@ def get_match_contents(coll_id, scope, name, content_type=None, min_id=None, max
 
 @read_session
 def get_contents(scope=None, name=None, request_id=None, transform_id=None, workload_id=None, coll_id=None, status=None,
-                 relation_type=None, to_json=False, session=None):
+                 relation_type=None, without_content_dep_id=False, to_json=False, session=None):
     """
     Get content or raise a NoObject exception.
 
@@ -335,6 +335,8 @@ def get_contents(scope=None, name=None, request_id=None, transform_id=None, work
             query = query.filter(models.Content.status.in_(status))
         if relation_type:
             query = query.filter(models.Content.content_relation_type == relation_type)
+        if without_content_dep_id:
+            query = query.filter(or_(models.Content.content_dep_id == None, models.Content.content_dep_id == 0))  # noqa: E711
 
         query = query.order_by(asc(models.Content.map_id))
 
@@ -355,14 +357,17 @@ def get_contents(scope=None, name=None, request_id=None, transform_id=None, work
 
 
 @read_session
-def get_contents_by_request_transform(request_id=None, transform_id=None, workload_id=None, status=None, map_id=None, status_updated=False, with_deps=True, session=None):
+def get_contents_by_request_transform(request_id=None, transform_id=None, workload_id=None, status=None, map_id=None,
+                                      status_updated=False, with_deps=True, page_num=None, page_size=None, by_map=False, match_content_ext=False, only_outputs=False, session=None):
     """
     Get content or raise a NoObject exception.
 
     :param request_id: request id.
     :param transform_id: transform id.
     :param workload_id: workload id.
-
+    :param page_num: page number (0-based) for paginated retrieval.
+    :param page_size: number of distinct map_ids per page.
+    :param match_content_ext: Whether to match content extensions.
     :param session: The database session in use.
 
     :raises NoObject: If no content is founded.
@@ -382,15 +387,121 @@ def get_contents_by_request_transform(request_id=None, transform_id=None, worklo
             query = query.filter(models.Content.transform_id == transform_id)
         if workload_id:
             query = query.filter(models.Content.workload_id == workload_id)
-        if status is not None:
-            query = query.filter(models.Content.substatus.in_(status))
-        if map_id:
+        if map_id is not None:
             query = query.filter(models.Content.map_id == map_id)
         if status_updated:
             query = query.filter(models.Content.status != models.Content.substatus)
         if not with_deps:
-            query = query.filter(models.Content.content_relation_type != 3)
+            query = query.filter(models.Content.content_relation_type != ContentRelationType.InputDependency)
+        if only_outputs:
+            query = query.filter(models.Content.content_relation_type == ContentRelationType.Output)
 
+        # Build qualifying condition: status match OR content_ext mismatch
+        conditions = []
+        if status is not None:
+            conditions.append(models.Content.substatus.in_(status))
+        if match_content_ext:
+            conditions.append(or_(
+                models.Content_ext.content_id == None,   # noqa E711
+                models.Content_ext.status != models.Content.substatus
+            ))
+
+        if not by_map:
+            if match_content_ext:
+                query = query.outerjoin(models.Content_ext, models.Content.content_id == models.Content_ext.content_id)
+            if conditions:
+                combined = or_(*conditions) if len(conditions) > 1 else conditions[0]
+                query = query.filter(combined)
+            query = query.order_by(asc(models.Content.request_id), asc(models.Content.transform_id), asc(models.Content.map_id))
+            if page_num is not None and page_size is not None:
+                query = query.offset(page_num * page_size).limit(page_size)
+        else:
+            # by_map: find qualifying map_ids, then return all contents for those maps
+            qualifying_maps = session.query(models.Content.map_id.label('map_id')).distinct()
+            if request_id:
+                qualifying_maps = qualifying_maps.filter(models.Content.request_id == request_id)
+            if transform_id:
+                qualifying_maps = qualifying_maps.filter(models.Content.transform_id == transform_id)
+            if not with_deps:
+                qualifying_maps = qualifying_maps.filter(models.Content.content_relation_type != ContentRelationType.InputDependency)
+            if only_outputs:
+                qualifying_maps = qualifying_maps.filter(models.Content.content_relation_type == ContentRelationType.Output)
+            if match_content_ext:
+                qualifying_maps = qualifying_maps.outerjoin(models.Content_ext, models.Content.content_id == models.Content_ext.content_id)
+                qualifying_maps = qualifying_maps.filter(models.Content.content_relation_type == ContentRelationType.Output)
+            if conditions:
+                combined = or_(*conditions) if len(conditions) > 1 else conditions[0]
+                qualifying_maps = qualifying_maps.filter(combined)
+            qualifying_maps = qualifying_maps.order_by(asc(models.Content.map_id))
+            if page_num is not None and page_size is not None:
+                qualifying_maps = qualifying_maps.offset(page_num * page_size).limit(page_size)
+            qualifying_map_ids = [row[0] for row in qualifying_maps.all()]
+            if not qualifying_map_ids:
+                return []
+            query = query.filter(models.Content.map_id.in_(qualifying_map_ids))
+            query = query.order_by(asc(models.Content.request_id), asc(models.Content.transform_id), asc(models.Content.map_id))
+
+        tmp = query.all()
+        rets = []
+        if tmp:
+            for t in tmp:
+                rets.append(t.to_dict())
+        return rets
+    except sqlalchemy.orm.exc.NoResultFound as error:
+        raise exceptions.NoObject('No record can be found with (transform_id=%s): %s' %
+                                  (transform_id, error))
+    except Exception as error:
+        raise error
+
+
+@read_session
+def get_contents_by_request_transform_for_missing(request_id=None, transform_id=None, status=None, with_deps=True, by_map=True, only_outputs=False, session=None):
+    """
+    Get all contents belonging to map_ids that have at least one content with status or substatus matching the given status.
+
+    Differs from get_contents_by_request_transform in that it checks both the status and substatus columns,
+    ensuring maps with any Missing content (even if substatus diverged) are included.
+
+    :param request_id: request id.
+    :param transform_id: transform id.
+    :param status: ContentStatus value(s) to match against status or substatus.
+    :param with_deps: if False, exclude InputDependency contents.
+    :param only_outputs: if True, restrict to Output contents.
+    :param session: The database session in use.
+
+    :returns: list of content dicts.
+    """
+    try:
+        if status is not None:
+            if not isinstance(status, (tuple, list)):
+                status = [status]
+
+        qualifying_maps = session.query(models.Content.map_id.label('map_id')).distinct()
+        if request_id:
+            qualifying_maps = qualifying_maps.filter(models.Content.request_id == request_id)
+        if transform_id:
+            qualifying_maps = qualifying_maps.filter(models.Content.transform_id == transform_id)
+        if not with_deps:
+            qualifying_maps = qualifying_maps.filter(models.Content.content_relation_type != ContentRelationType.InputDependency)
+        if only_outputs:
+            qualifying_maps = qualifying_maps.filter(models.Content.content_relation_type == ContentRelationType.Output)
+        if status is not None:
+            qualifying_maps = qualifying_maps.filter(
+                or_(models.Content.status.in_(status), models.Content.substatus.in_(status))
+            )
+        qualifying_maps = qualifying_maps.order_by(asc(models.Content.map_id))
+        qualifying_map_ids = [row[0] for row in qualifying_maps.all()]
+        if not qualifying_map_ids:
+            return []
+
+        query = session.query(models.Content)
+        if request_id:
+            query = query.filter(models.Content.request_id == request_id)
+        if transform_id:
+            query = query.filter(models.Content.transform_id == transform_id)
+        if not with_deps:
+            query = query.filter(models.Content.content_relation_type != ContentRelationType.InputDependency)
+        query = query.filter(models.Content.map_id.in_(qualifying_map_ids))
         query = query.order_by(asc(models.Content.request_id), asc(models.Content.transform_id), asc(models.Content.map_id))
 
         tmp = query.all()
@@ -402,6 +513,73 @@ def get_contents_by_request_transform(request_id=None, transform_id=None, worklo
     except sqlalchemy.orm.exc.NoResultFound as error:
         raise exceptions.NoObject('No record can be found with (transform_id=%s): %s' %
                                   (transform_id, error))
+    except Exception as error:
+        raise error
+
+
+@read_session
+def get_input_output_map_count(request_id, transform_id, session=None):
+    """
+    Return the number of distinct (map_id, sub_map_id) pairs for the given transform.
+    Uses a subquery to count distinct pairs without loading all content rows.
+    request_id is included because the database uses it for virtual table partitioning.
+    """
+    try:
+        subq = session.query(models.Content.map_id, models.Content.sub_map_id)\
+                      .filter(models.Content.request_id == request_id)\
+                      .filter(models.Content.transform_id == transform_id)\
+                      .filter(models.Content.content_relation_type == ContentRelationType.Input)\
+                      .distinct()\
+                      .subquery()
+        count = session.query(func.count()).select_from(subq).scalar()
+        return count or 0
+    except Exception as error:
+        raise error
+
+
+@read_session
+def get_content_name_to_id_map(request_id, transform_id, es=False, session=None):
+    """
+    Return a lightweight {name: [content_id, ...]} mapping for Input and Output contents.
+    For ES jobs (es=True), uses the 'path' column as the key instead of 'name'.
+    Fetches only two columns instead of full content rows.
+    request_id is included because the database uses it for virtual table partitioning.
+    """
+    try:
+        key_col = models.Content.path if es else models.Content.name
+        rows = session.query(key_col, models.Content.content_id)\
+                      .filter(models.Content.request_id == request_id)\
+                      .filter(models.Content.transform_id == transform_id)\
+                      .filter(models.Content.content_relation_type.in_([
+                          ContentRelationType.Input, ContentRelationType.Output]))\
+                      .all()
+        name_to_id_map = {}
+        for name, content_id in rows:
+            if name not in name_to_id_map:
+                name_to_id_map[name] = []
+            name_to_id_map[name].append(content_id)
+        return name_to_id_map
+    except Exception as error:
+        raise error
+
+
+@read_session
+def has_input_contents_without_external_id(request_id, transform_id, session=None):
+    """
+    Check whether any Input content for the given transform is missing an external_content_id.
+
+    Returns True if having Input contents without external_content_id, False otherwise.
+    Uses a single COUNT query instead of loading all content rows.
+    request_id is included because the database uses it for virtual table partitioning.
+    """
+    try:
+        count = session.query(func.count(models.Content.content_id))\
+                       .filter(models.Content.request_id == request_id)\
+                       .filter(models.Content.transform_id == transform_id)\
+                       .filter(models.Content.content_relation_type == ContentRelationType.Input)\
+                       .filter(models.Content.external_content_id.is_(None))\
+                       .scalar()
+        return count > 0
     except Exception as error:
         raise error
 
@@ -462,6 +640,97 @@ def get_content_status_statistics_by_relation_type(transform_ids=None, session=N
         query = query.group_by(models.Content.status, models.Content.content_relation_type, models.Content.transform_id)
         tmp = query.all()
         return tmp
+    except Exception as error:
+        raise error
+
+
+@read_session
+def get_content_status_statistics_by_coll(request_id=None, transform_id=None, with_deps=True, session=None):
+    """
+    Get content statistics grouped by (coll_id, status), with total bytes summed.
+
+    Returns a dict keyed by coll_id, each value being a dict of
+    {status: {'count': N, 'bytes': B}}.
+
+    An extra key 'has_unsynced' is set to True on a coll_id entry when
+    any row has status != substatus (indicating pending flush).
+
+    :param request_id: request id.
+    :param transform_id: transform id.
+    :param session: The database session in use.
+
+    :returns: dict {coll_id: {status: {'count': N, 'bytes': B}, 'has_unsynced': bool}}
+    """
+    try:
+        query = session.query(
+            models.Content.coll_id,
+            models.Content.status,
+            func.count(models.Content.content_id).label('cnt'),
+            func.sum(models.Content.bytes).label('total_bytes'),
+            func.sum(
+                sqlalchemy.case(
+                    (models.Content.status != models.Content.substatus, 1),
+                    else_=0
+                )
+            ).label('unsynced_count')
+        )
+        if request_id is not None:
+            query = query.filter(models.Content.request_id == request_id)
+        if transform_id is not None:
+            query = query.filter(models.Content.transform_id == transform_id)
+        if not with_deps:
+            query = query.filter(models.Content.content_relation_type != ContentRelationType.InputDependency)
+        query = query.group_by(models.Content.coll_id, models.Content.status)
+
+        rets = {}
+        for row in query.all():
+            coll_id, status, cnt, total_bytes, unsynced_count = row
+            if coll_id not in rets:
+                rets[coll_id] = {'has_unsynced': False}
+            rets[coll_id][status] = {
+                'count': cnt,
+                'bytes': total_bytes or 0
+            }
+            if unsynced_count and unsynced_count > 0:
+                rets[coll_id]['has_unsynced'] = True
+        return rets
+    except Exception as error:
+        raise error
+
+
+@read_session
+def get_content_ext_status_statistics_by_coll(request_id=None, transform_id=None, session=None):
+    """
+    Get contents_ext statistics grouped by (coll_id, status).
+
+    Returns a dict keyed by coll_id, each value being a dict of
+    {status: N}.
+
+    :param request_id: request id.
+    :param transform_id: transform id.
+    :param session: The database session in use.
+
+    :returns: dict {coll_id: {status: count}}
+    """
+    try:
+        query = session.query(
+            models.Content_ext.coll_id,
+            models.Content_ext.status,
+            func.count(models.Content_ext.content_id).label('cnt')
+        )
+        if request_id is not None:
+            query = query.filter(models.Content_ext.request_id == request_id)
+        if transform_id is not None:
+            query = query.filter(models.Content_ext.transform_id == transform_id)
+        query = query.group_by(models.Content_ext.coll_id, models.Content_ext.status)
+
+        rets = {}
+        for row in query.all():
+            coll_id, status, cnt = row
+            if coll_id not in rets:
+                rets[coll_id] = {}
+            rets[coll_id][status] = cnt
+        return rets
     except Exception as error:
         raise error
 
@@ -654,7 +923,7 @@ def custom_bulk_update_mappings(model, parameters, batch_size=1000, session=None
 
 
 @transactional_session
-def update_contents(parameters, use_bulk_update_mappings=True, request_id=None, transform_id=None, session=None):
+def update_contents(parameters, use_bulk_update_mappings=True, grouping=True, request_id=None, transform_id=None, session=None):
     """
     update contents.
 
@@ -672,7 +941,7 @@ def update_contents(parameters, use_bulk_update_mappings=True, request_id=None, 
 
             # session.bulk_update_mappings(models.Content, parameters)
             custom_bulk_update_mappings(models.Content, parameters, session=session)
-        else:
+        elif grouping:
             groups = group_list(parameters, key='content_id')
             for group_key in groups:
                 group = groups[group_key]
@@ -686,6 +955,8 @@ def update_contents(parameters, use_bulk_update_mappings=True, request_id=None, 
                     query = query.filter(models.Content.transform_id == transform_id)
                 query = query.filter(models.Content.content_id.in_(keys))\
                              .update(items, synchronize_session=False)
+        else:
+            session.bulk_update_mappings(models.Content, parameters)
     except sqlalchemy.orm.exc.NoResultFound as error:
         raise exceptions.NoObject('Content cannot be found: %s' % (error))
 

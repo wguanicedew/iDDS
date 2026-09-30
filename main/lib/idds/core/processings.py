@@ -28,6 +28,7 @@ def add_processing(request_id, workload_id, transform_id, status, submitter=None
                    substatus=ProcessingStatus.New, granularity=None,
                    granularity_type=GranularityType.File,
                    processing_type=ProcessingType.Workflow,
+                   site=None, run_id=None,
                    command=CommandType.NoneCommand,
                    new_poll_period=1, update_poll_period=10,
                    internal_id=None, parent_internal_id=None, loop_index=None,
@@ -54,6 +55,7 @@ def add_processing(request_id, workload_id, transform_id, status, submitter=None
     return orm_processings.add_processing(request_id=request_id, workload_id=workload_id, transform_id=transform_id,
                                           status=status, substatus=substatus, submitter=submitter,
                                           granularity=granularity, granularity_type=granularity_type,
+                                          site=site, run_id=run_id,
                                           new_poll_period=new_poll_period,
                                           update_poll_period=update_poll_period,
                                           new_retries=new_retries, update_retries=update_retries,
@@ -86,7 +88,7 @@ def get_processing(processing_id=None, request_id=None, transform_id=None, to_js
 
 @read_session
 def get_processings(request_id=None, workload_id=None, transform_id=None, loop_index=None, internal_ids=None,
-                    parent_internal_ids=None, to_json=False, session=None):
+                    site=None, parent_internal_ids=None, run_id=None, to_json=False, session=None):
     """
     Get processing or raise a NoObject exception.
 
@@ -104,6 +106,8 @@ def get_processings(request_id=None, workload_id=None, transform_id=None, loop_i
         transform_id=transform_id,
         loop_index=loop_index,
         internal_ids=internal_ids,
+        site=site,
+        run_id=run_id,
         to_json=to_json, session=session
     )
     if not prs or not parent_internal_ids:
@@ -277,10 +281,16 @@ def update_processing_with_collection_contents(updated_processing, new_processin
 
 
 def resolve_input_dependency_id(new_input_dependency_contents, request_id=None, session=None):
+    has_missing_dep = False
     coll_ids = []
     for content in new_input_dependency_contents:
-        if content['coll_id'] not in coll_ids:
+        if 'sub_map_id' not in content or content['sub_map_id'] is None:
+            content['sub_map_id'] = 0
+        if not content['content_dep_id'] and content['coll_id'] not in coll_ids:
             coll_ids.append(content['coll_id'])
+    if not coll_ids:
+        return new_input_dependency_contents, has_missing_dep
+
     contents = orm_contents.get_contents(coll_id=coll_ids, request_id=request_id, relation_type=ContentRelationType.Output, session=session)
     content_name_id_map = {}
     for content in contents:
@@ -294,16 +304,46 @@ def resolve_input_dependency_id(new_input_dependency_contents, request_id=None, 
         content_name_id_map[content['coll_id']][content['name']] = content['content_id']
 
     for content in new_input_dependency_contents:
-        if 'sub_map_id' not in content or content['sub_map_id'] is None:
-            content['sub_map_id'] = 0
         # dep_sub_map_id = content.get("dep_sub_map_id", 0)
         # if dep_sub_map_id is None:
         #     dep_sub_map_id = 0
         # content_dep_id = content_name_id_map[content['coll_id']][content['name']][dep_sub_map_id]
-        content_dep_id = content_name_id_map[content['coll_id']][content['name']]
-        content['content_dep_id'] = content_dep_id
-        content['name'] = str(content_dep_id)
-    return new_input_dependency_contents
+        if not content['content_dep_id'] and content['coll_id'] in content_name_id_map and content['name'] in content_name_id_map[content['coll_id']]:
+            content_dep_id = content_name_id_map[content['coll_id']][content['name']]
+            content['content_dep_id'] = content_dep_id
+            content['name'] = str(content_dep_id)
+        else:
+            has_missing_dep = True
+    return new_input_dependency_contents, has_missing_dep
+
+
+def fix_input_dependency_contents(request_id=None, transform_id=None, session=None):
+    input_dependency_contents = orm_contents.get_contents(request_id=request_id, transform_id=transform_id,
+                                                          relation_type=ContentRelationType.InputDependency,
+                                                          without_content_dep_id=True, session=session)
+    coll_ids = []
+    for content in input_dependency_contents:
+        if content['coll_id'] not in coll_ids:
+            coll_ids.append(content['coll_id'])
+    if not coll_ids:
+        return []
+    contents = orm_contents.get_contents(coll_id=coll_ids, request_id=request_id, relation_type=ContentRelationType.Output, session=session)
+    content_name_id_map = {}
+    for content in contents:
+        if content['coll_id'] not in content_name_id_map:
+            content_name_id_map[content['coll_id']] = {}
+        if content['name'] not in content_name_id_map[content['coll_id']]:
+            content_name_id_map[content['coll_id']][content['name']] = {}
+        content_name_id_map[content['coll_id']][content['name']] = content['content_id']
+
+    to_update_input_dependency_contents = []
+    for content in input_dependency_contents:
+        if 'content_dep_id' not in content or content['content_dep_id'] is None or content['content_dep_id'] == 0:
+            if content['coll_id'] in content_name_id_map and content['name'] in content_name_id_map[content['coll_id']]:
+                content_dep_id = content_name_id_map[content['coll_id']][content['name']]
+                to_update = {'content_id': content['content_id'], 'content_dep_id': content_dep_id}
+                to_update_input_dependency_contents.append(to_update)
+    return to_update_input_dependency_contents
 
 
 @transactional_session
@@ -312,7 +352,7 @@ def update_processing_contents(update_processing, update_contents=None, update_m
                                new_update_contents=None, new_input_dependency_contents=None,
                                new_contents_ext=None, update_contents_ext=None,
                                request_id=None, transform_id=None, use_bulk_update_mappings=True,
-                               message_bulk_size=2000, session=None):
+                               fix_missing_content_dep_id=False, message_bulk_size=2000, session=None):
     """
     Update processing with contents.
 
@@ -322,31 +362,52 @@ def update_processing_contents(update_processing, update_contents=None, update_m
     # new_update_contents, new_contents_ext, new_input_dependency_contents and then new_contents
     # make sure new_contents the last one: when a process is killed, the session may break consistency.
     # new_contents is used to check not inserted contents
+    num_added_contents = 0
+    num_updated_contents = 0
+    num_added_messages = 0
+    num_updated_messages = 0
     if new_contents_ext:
         chunks = get_list_chunks(new_contents_ext)
         for chunk in chunks:
             orm_contents.add_contents_ext(chunk, session=session)
+        num_added_contents += len(new_contents_ext)
+    has_missing_dep = False
     if new_input_dependency_contents:
-        new_input_dependency_contents = resolve_input_dependency_id(new_input_dependency_contents, request_id=request_id, session=session)
+        new_input_dependency_contents, has_missing_dep = resolve_input_dependency_id(new_input_dependency_contents, request_id=request_id, session=session)
         chunks = get_list_chunks(new_input_dependency_contents)
         for chunk in chunks:
             orm_contents.add_contents(chunk, session=session)
+        num_added_contents += len(new_input_dependency_contents)
     if new_update_contents:
         # first add and then delete, to trigger the trigger 'update_content_dep_status'.
         # too slow
         chunks = get_list_chunks(new_update_contents)
         for chunk in chunks:
             orm_contents.add_contents_update(chunk, session=session)
+        num_updated_contents += len(new_update_contents)
         # orm_contents.delete_contents_update(session=session)
         pass
     if messages:
         if not type(messages) in [list, tuple]:
             messages = [messages]
         orm_messages.add_messages(messages, bulk_size=message_bulk_size, session=session)
+        num_added_messages += len(messages)
     if new_contents:
         chunks = get_list_chunks(new_contents)
         for chunk in chunks:
             orm_contents.add_contents(chunk, session=session)
+        num_added_contents += len(new_contents)
+    # fix input_dependency_contents without content_dep_id.
+    # It happens when dependency content is added after the input_dependency_contents are added,
+    # when there are dependencies inside one task between different jobs.
+    if has_missing_dep or fix_missing_content_dep_id:
+        to_update_input_dependency_contents = fix_input_dependency_contents(request_id=request_id, transform_id=transform_id, session=session)
+        if to_update_input_dependency_contents:
+            chunks = get_list_chunks(to_update_input_dependency_contents)
+            for chunk in chunks:
+                orm_contents.update_contents(chunk, request_id=request_id, transform_id=transform_id,
+                                             use_bulk_update_mappings=False, grouping=False, session=session)
+            num_updated_contents += len(to_update_input_dependency_contents)
 
     # update contents, keep the order
     if update_contents_ext:
@@ -354,6 +415,8 @@ def update_processing_contents(update_processing, update_contents=None, update_m
         for chunk in chunks:
             orm_contents.update_contents_ext(chunk, request_id=request_id, transform_id=transform_id,
                                              use_bulk_update_mappings=use_bulk_update_mappings, session=session)
+        num_updated_contents += len(update_contents_ext)
+
     if update_dep_contents:
         request_id, update_dep_contents_status_name, update_dep_contents_status = update_dep_contents
         for status_name in update_dep_contents_status_name:
@@ -363,11 +426,13 @@ def update_processing_contents(update_processing, update_contents=None, update_m
                 chunks = get_list_chunks(status_content_ids)
                 for chunk in chunks:
                     orm_contents.update_dep_contents(request_id, chunk, status, session=session)
+                num_updated_contents += len(status_content_ids)
     if update_contents:
         chunks = get_list_chunks(update_contents)
         for chunk in chunks:
             orm_contents.update_contents(chunk, request_id=request_id, transform_id=transform_id,
                                          use_bulk_update_mappings=use_bulk_update_mappings, session=session)
+        num_updated_contents += len(update_contents)
     if update_collections:
         orm_collections.update_collections(update_collections, session=session)
 
@@ -376,11 +441,13 @@ def update_processing_contents(update_processing, update_contents=None, update_m
         for chunk in chunks:
             orm_messages.update_messages(chunk, bulk_size=message_bulk_size, request_id=request_id, transform_id=transform_id,
                                          use_bulk_update_mappings=use_bulk_update_mappings, session=session)
+        num_updated_messages += len(update_messages)
 
     if update_processing:
         orm_processings.update_processing(processing_id=update_processing['processing_id'],
                                           parameters=update_processing['parameters'],
                                           session=session)
+    return num_added_contents, num_updated_contents, num_added_messages, num_updated_messages
 
 
 @transactional_session

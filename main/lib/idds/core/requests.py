@@ -182,7 +182,7 @@ def get_request_ids_by_workload_id(workload_id, session=None):
 
 
 @read_session
-def get_request_ids_by_name(name, session=None):
+def get_request_ids_by_name(name, scope=None, exact_match=False, session=None):
     """
     Get request ids or raise a NoObject exception.
 
@@ -193,7 +193,7 @@ def get_request_ids_by_name(name, session=None):
 
     :returns: Request {name:id} dict.
     """
-    return orm_requests.get_request_ids_by_name(name, session=session)
+    return orm_requests.get_request_ids_by_name(name, scope=scope, exact_match=exact_match, session=session)
 
 
 @transactional_session
@@ -290,7 +290,7 @@ def generate_collection(transform, collection, relation_type=CollectionRelationT
 
 
 def generate_collections(transform):
-    work = transform['transform_metadata']['work']
+    work = transform['transform_metadata']['work'] if transform.get('transform_metadata') and 'work' in transform.get('transform_metadata') else None
 
     if not hasattr(work, 'get_input_collections'):
         return []

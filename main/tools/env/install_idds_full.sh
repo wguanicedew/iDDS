@@ -30,11 +30,16 @@ pip install rucio-clients-atlas rucio-clients panda-client-light panda-client
 # root ca.crt to  /opt/idds/etc/ca.crt
 
 pip install requests SQLAlchemy urllib3 retrying mod_wsgi flask futures stomp.py cx-Oracle  unittest2 pep8 flake8 pytest nose sphinx recommonmark sphinx-rtd-theme nevergrad
- pip install psycopg2-binary
+ pip install psycopg2-binary "psycopg[binary]"
 
 # add "auth_type = x509_proxy" to /opt/idds/etc/rucio.cfg
 
 # python setup.py install --old-and-unmanageable
+# Generate httpd conf .install_template files from the running Python env.
+# Run this after 'pip install' / conda install of the iDDS packages so that
+# site-packages / home / bin paths reflect the target machine, not the build env.
+python3 /opt/idds/tools/env/setup_httpd_conf.py
+# cp /opt/idds/etc/idds/rest/httpd-idds-443-py39-cc7.conf.install_template /etc/httpd/conf.d/httpd-idds-443-py39-cc7.conf
 # cp /opt/idds/etc/idds/rest/httpd-idds-443-py36-cc7.conf.install_template /etc/httpd/conf.d/httpd-idds-443-py36-cc7.conf
 
 # scp wguan@aipanda102:/opt/idds/etc/rucio.cfg /opt/idds/etc/rucio.cfg

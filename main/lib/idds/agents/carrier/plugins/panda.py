@@ -95,14 +95,23 @@ class PandaSubmitterPoller(BaseSubmitterPoller):
             if work.parent_workload_id:
                 parent_tid = work.parent_workload_id
             return_code = Client.insertTaskParams(task_params, verbose=True, parent_tid=parent_tid)
-            if return_code[0] == 0 and return_code[1][0] is True:
+            if return_code[0] == 0 and return_code[1] and return_code[1][0] in [True, 0]:
                 try:
-                    task_id = int(return_code[1][1])
+                    ret_string = str(return_code[1][1])
+                    ret_string = ret_string.replace("succeeded. new jediTaskID=", "")
+                    if 'jediTaskID=' in ret_string:
+                        task_id = int(ret_string.split("=")[1])
+                    elif "=" in ret_string:
+                        task_id = int(ret_string.split("=")[1])
+                    else:
+                        task_id = int(ret_string)
                     return task_id, None
                 except Exception as ex:
                     if logger:
                         logger.warn(log_prefix + "task id is not retruned: (%s) is not task id: %s" % (return_code[1][1], str(ex)))
-                    if return_code[1][1] and 'jediTaskID=' in return_code[1][1]:
+                    if isinstance(return_code[1][1], int):
+                        return return_code[1][1], None
+                    elif return_code[1][1] and 'jediTaskID=' in return_code[1][1]:
                         parts = return_code[1][1].split(" ")
                         for part in parts:
                             if 'jediTaskID=' in part:

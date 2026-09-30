@@ -21,6 +21,9 @@
 # git token
 .githubtoken
 
+#
+.DS_Store
+
 # config files
 etc/*.cfg
 etc/*.conf
@@ -36,4 +39,9 @@ etc/idds/rest/gacl
 # compile files
 *egg*
 # *build*
+build/
 
+idds.wsgi
+*conf.install_template
+
+prompt.back

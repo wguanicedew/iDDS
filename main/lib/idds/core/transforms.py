@@ -36,7 +36,7 @@ def add_transform(request_id, workload_id, transform_type, transform_tag=None, p
                   internal_id=None, has_previous_conditions=None, loop_index=None,
                   parent_internal_id=None, command=CommandType.NoneCommand,
                   cloned_from=None, triggered_conditions=None, untriggered_conditions=None,
-                  site=None, workprogress_id=None, session=None):
+                  site=None, workprogress_id=None, run_id=None, session=None):
     """
     Add a transform.
 
@@ -78,7 +78,7 @@ def add_transform(request_id, workload_id, transform_type, transform_tag=None, p
                                                 loop_index=loop_index, cloned_from=cloned_from,
                                                 triggered_conditions=triggered_conditions,
                                                 untriggered_conditions=untriggered_conditions,
-                                                workprogress_id=workprogress_id, session=session)
+                                                workprogress_id=workprogress_id, run_id=run_id, session=session)
     return transform_id
 
 
@@ -141,11 +141,13 @@ def get_transform_ids(workprogress_id, request_id=None, workload_id=None, transf
 
 
 @read_session
-def get_transforms(request_id=None, workload_id=None, transform_id=None, loop_index=None, internal_ids=None, to_json=False, session=None):
+def get_transforms(request_id=None, workload_id=None, transform_id=None, loop_index=None, internal_ids=None,
+                   run_id=None, to_json=False, session=None):
     """
     Get transforms or raise a NoObject exception.
 
     :param workprogress_id: Workprogress id.
+    :param run_id: Run id.
     :param to_json: return json format.
     :param session: The database session in use.
 
@@ -158,6 +160,7 @@ def get_transforms(request_id=None, workload_id=None, transform_id=None, loop_in
                                          transform_id=transform_id,
                                          loop_index=loop_index,
                                          internal_ids=internal_ids,
+                                         run_id=run_id,
                                          to_json=to_json, session=session)
 
 
@@ -228,7 +231,7 @@ def add_transform_outputs(transform, transform_parameters, input_collections=Non
 
     :raises DatabaseException: If there is a database error.
     """
-    work = transform['transform_metadata']['work']
+    work = transform['transform_metadata']['work'] if transform.get('transform_metadata') and 'work' in transform.get('transform_metadata') else None
 
     new_pr_ids, update_pr_ids = [], []
 
@@ -311,9 +314,9 @@ def add_transform_outputs(transform, transform_parameters, input_collections=Non
     if transform:
         if processing_id:
             # work.set_processing_id(new_processing, processing_id)
-            if hasattr(work, 'set_processing_id'):
+            if work and hasattr(work, 'set_processing_id'):
                 work.set_processing_id(new_processing['processing_metadata']['processing'], processing_id)
-        if hasattr(work, 'refresh_work'):
+        if work and hasattr(work, 'refresh_work'):
             work.refresh_work()
         orm_transforms.update_transform(transform_id=transform['transform_id'],
                                         parameters=transform_parameters,
@@ -372,13 +375,28 @@ def clean_next_poll_at(status, session=None):
 
 
 @read_session
-def get_transform_input_output_maps(transform_id, input_coll_ids, output_coll_ids, log_coll_ids=[], with_sub_map_id=False, is_es=False, with_deps=True, session=None):
+def get_transform_input_output_maps(request_id, transform_id, input_coll_ids, output_coll_ids, log_coll_ids=[], with_sub_map_id=False, is_es=False,
+                                    with_deps=True, page_num=None, page_size=None, status=None, match_content_ext=False, only_outputs=False,
+                                    for_missing=False, session=None):
     """
     Get transform input output maps.
 
+    :param request_id: request id (used for virtual table partitioning).
     :param transform_id: transform id.
+    :param page_num: page number (0-based) for paginated retrieval.
+    :param page_size: number of distinct map_ids per page.
     """
-    contents = orm_contents.get_contents_by_request_transform(transform_id=transform_id, with_deps=with_deps, session=session)
+    if not for_missing:
+        if only_outputs or (status is None and (page_num is None or page_size is None)):
+            by_map = False
+        else:
+            by_map = True
+        contents = orm_contents.get_contents_by_request_transform(request_id=request_id, transform_id=transform_id, with_deps=with_deps,
+                                                                  page_num=page_num, page_size=page_size, status=status, by_map=by_map,
+                                                                  match_content_ext=match_content_ext, only_outputs=only_outputs, session=session)
+    else:
+        contents = orm_contents.get_contents_by_request_transform_for_missing(request_id=request_id, transform_id=transform_id, with_deps=with_deps,
+                                                                              status=ContentStatus.Missing, by_map=True, only_outputs=False, session=session)
     ret = {}
     for content in contents:
         map_id = content['map_id']

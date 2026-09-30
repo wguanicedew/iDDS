@@ -15,6 +15,7 @@ Borrowed from:
 https://github.com/rucio/rucio/blob/master/lib/rucio/db/sqla/session.py
 """
 
+import logging
 import sys
 
 from functools import wraps
@@ -31,6 +32,8 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 from idds.common.config import config_get, config_has_option
 from idds.common.exceptions import IDDSException, DatabaseException
 
+
+LOG = logging.getLogger(__name__)
 
 DATABASE_SECTION = 'database'
 
@@ -97,11 +100,17 @@ def mysql_convert_decimal_to_float(dbapi_conn, connection_rec):
 
 def psql_convert_decimal_to_float(dbapi_conn, connection_rec):
     """
-    The default datatype returned by psycopg2 for numerics is decimal.Decimal.
+    The default datatype returned by psycopg2/psycopg for numerics is decimal.Decimal.
     This type cannot be serialised to JSON, therefore we need to autoconvert to floats.
     :param dbapi_conn: DBAPI connection
     :param connection_rec: connection record
     """
+
+    # psycopg (v3), the default PostgreSQL driver since SQLAlchemy 2.1
+    if type(dbapi_conn).__module__.startswith('psycopg.'):
+        from psycopg.types.numeric import FloatLoader  # pylint: disable=import-error
+        dbapi_conn.adapters.register_loader("numeric", FloatLoader)
+        return
 
     try:
         import psycopg2.extensions  # pylint: disable=import-error
@@ -144,7 +153,13 @@ def get_engine(echo=True):
                 pass
         params['execution_options'] = {'schema_translate_map': {None: DEFAULT_SCHEMA_NAME}}
         if 'oracledb' in sql_connection:
-            params['thick_mode'] = True
+            try:
+                import oracledb  # pylint: disable=import-error
+                oracledb.init_oracle_client()
+                params['thick_mode'] = True
+            except Exception as err:
+                LOG.warning('Could not start Oracle thick mode; falling back to thin: %s', err)
+
         _ENGINE = create_engine(sql_connection, **params)
 
         if 'mysql' in sql_connection:
@@ -191,7 +206,7 @@ def get_maker():
         Return a SQLAlchemy sessionmaker.
         May assign __MAKER if not already assigned.
     """
-    global _MAKER, _ENGINE
+    global _MAKER, _ENGINE   # noqa: F824
     assert _ENGINE
     if not _MAKER:
         _MAKER = sessionmaker(bind=_ENGINE, autocommit=False, autoflush=False, expire_on_commit=True)
@@ -202,7 +217,7 @@ def get_session():
     """ Creates a session to a specific database, assumes that schema already in place.
         :returns: session
     """
-    global _MAKER, _LOCK
+    global _MAKER, _LOCK  # noqa: F824
     if not _MAKER:
         _LOCK.acquire()
         try:

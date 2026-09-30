@@ -6,6 +6,4 @@
 # http://www.apache.org/licenses/LICENSE-2.0OA
 #
 # Authors:
-# - Wen Guan, <wen.guan@cern.ch>, 2019
-
-# idds atlas
+# - Wen Guan, <wen.guan@cern.ch>, 2025

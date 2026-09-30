@@ -187,12 +187,11 @@ class CompositeCondition(Base):
         if type(conditions) not in [tuple, list]:
             raise exceptions.IDDSException("conditions must be list")
         for cond in conditions:
-            assert(inspect.ismethod(cond))
+            assert (inspect.ismethod(cond))
 
     def add_condition(self, cond):
-        assert(inspect.ismethod(cond))
-        assert(isinstance(cond.__self__, Work))
-
+        assert (inspect.ismethod(cond))
+        assert (isinstance(cond.__self__, Work))
         # self.conditions.append({'condition': cond, 'current_work': cond.__self__})
 
         self._conditions.append(cond)
@@ -337,7 +336,7 @@ class CompositeCondition(Base):
         new_false_works = []
         for w in self.false_works:
             if isinstance(w, CompositeCondition):
-                # work = w.load_condtions(works, works_template)
+                # work = w.load_conditions(works, works_template)
                 w.load_conditions(works)
                 work = w
             elif isinstance(w, Workflow):
@@ -562,8 +561,8 @@ class TemplateCondition(CompositeCondition):
         if len(conditions) > 1:
             raise exceptions.IDDSException("Condition class can only support one condition. To support multiple condition, please use CompositeCondition.")
         for cond in conditions:
-            assert(inspect.ismethod(cond))
-            assert(isinstance(cond.__self__, Work))
+            assert (inspect.ismethod(cond))
+            assert (isinstance(cond.__self__, Work))
 
     def add_condition(self, cond):
         raise exceptions.IDDSException("Condition class doesn't support add_condition. To support multiple condition, please use CompositeCondition.")
@@ -1559,7 +1558,7 @@ class WorkflowBase(Base):
         self.first_initial = False
         cond_works = cond.all_works()
         for cond_work in cond_works:
-            assert(cond_work.get_internal_id() in self.get_works())
+            assert (cond_work.get_internal_id() in self.get_works())
 
         conditions = self.conditions
         conditions[cond.get_internal_id()] = cond
@@ -1738,7 +1737,10 @@ class WorkflowBase(Base):
             parent_task_names = work.get_ancestry_works()
             parent_internal_ids = []
             if parent_task_names:
-                parent_internal_ids = [task_name_to_internal_id_map[t_name] for t_name in parent_task_names]
+                own_internal_id = work.get_internal_id()
+                parent_internal_ids = [task_name_to_internal_id_map[t_name]
+                                       for t_name in parent_task_names
+                                       if task_name_to_internal_id_map.get(t_name) != own_internal_id]
             work.parent_internal_ids = parent_internal_ids
         return works
 

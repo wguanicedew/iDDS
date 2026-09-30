@@ -447,7 +447,7 @@ class ATLASPandaWork(Work):
             if ip_scope_name not in mapped_inputs_scope_name:
                 new_inputs.append(ip)
 
-        # to avoid cheking new inputs if there are no new inputs anymore
+        # to avoid checking new inputs if there are no new inputs anymore
         if (not new_inputs and self.collections[self._primary_input_collection].status in [CollectionStatus.Closed]):  # noqa: W503
             self.set_has_new_inputs(False)
         else:
@@ -498,14 +498,21 @@ class ATLASPandaWork(Work):
             proc = processing['processing_metadata']['processing']
             task_param = proc.processing_metadata['task_param']
             return_code = Client.insertTaskParams(task_param, verbose=True)
-            if return_code[0] == 0 and return_code[1][0] is True:
+            if return_code[0] == 0 and return_code[1] and return_code[1][0] in [True, 0]:
                 try:
-                    task_id = int(return_code[1][1])
+                    ret_string = str(return_code[1][1])
+                    ret_string = ret_string.replace("succeeded. new jediTaskID=", "")
+                    if 'jediTaskID=' in ret_string:
+                        task_id = int(ret_string.split("=")[1])
+                    elif "=" in ret_string:
+                        task_id = int(ret_string.split("=")[1])
+                    else:
+                        task_id = int(ret_string)
                     return task_id, None
                 except Exception as ex:
                     self.logger.warn("task id is not retruned: (%s) is not task id: %s" % (return_code[1][1], str(ex)))
                     # jediTaskID=26468582
-                    if return_code[1][1] and 'jediTaskID=' in return_code[1][1]:
+                    if return_code[1][1] and isinstance(return_code[1][1], str) and 'jediTaskID=' in return_code[1][1]:
                         parts = return_code[1][1].split(" ")
                         for part in parts:
                             if 'jediTaskID=' in part:

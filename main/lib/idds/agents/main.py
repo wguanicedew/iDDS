@@ -21,7 +21,7 @@ import traceback
 
 from idds.common.constants import Sections
 from idds.common.config import config_has_section, config_has_option, config_list_options, config_get
-from idds.common.utils import setup_logging, report_availability
+from idds.common.utils import setup_logging, report_availability, mask_passwords
 
 
 setup_logging('idds.log')
@@ -42,7 +42,8 @@ AGENTS = {
     'consumer': ['idds.agents.conductor.consumer.Consumer', Sections.Consumer],
     'archiver': ['idds.agents.archive.archiver.Archiver', Sections.Archiver],
     'coordinator': ['idds.agents.coordinator.coordinator.Coordinator', Sections.Coordinator],
-    'natscoordinator': ['idds.agents.coordinator.nats_coordinator.NATSCoordinator', Sections.Coordinator]
+    'natscoordinator': ['idds.agents.coordinator.nats_coordinator.NATSCoordinator', Sections.Coordinator],
+    'transceiver': ['idds.agents.prompt.transceiver.Transceiver', Sections.Prompt],
 }
 
 RUNNING_AGENTS = []
@@ -87,7 +88,11 @@ def load_agent(agent):
 
     agent_cls, agent_section = AGENTS[agent]
     attrs = load_agent_attrs(agent_section)
-    logging.info("Loading agent %s with class %s and attributes %s" % (agent, agent_cls, str(attrs)))
+    try:
+        masked = mask_passwords(attrs)
+    except Exception:
+        masked = attrs
+    logging.info("Loading agent %s with class %s and attributes %s" % (agent, agent_cls, str(masked)))
 
     k = agent_cls.rfind('.')
     agent_modules = agent_cls[:k]

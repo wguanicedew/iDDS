@@ -14,8 +14,8 @@ os.environ['PANDA_URL_SSL'] = 'https://rubin-panda-server-dev.slac.stanford.edu:
 # os.environ['PANDA_URL_SSL'] = 'https://panda-doma-k8s-panda.cern.ch/server/panda'
 # os.environ['PANDA_URL'] = 'http://panda-doma-k8s-panda.cern.ch:25080/server/panda'
 
-os.environ['PANDA_URL'] = 'https://usdf-panda-server.slac.stanford.edu:8443/server/panda'
-os.environ['PANDA_URL_SSL'] = 'https://usdf-panda-server.slac.stanford.edu:8443/server/panda'
+# os.environ['PANDA_URL'] = 'https://usdf-panda-server.slac.stanford.edu:8443/server/panda'
+# os.environ['PANDA_URL_SSL'] = 'https://usdf-panda-server.slac.stanford.edu:8443/server/panda'
 
 # os.environ['PANDA_URL_SSL'] = 'https://pandaserver01.sdcc.bnl.gov:25443/server/panda'
 # os.environ['PANDA_URL'] = 'https://pandaserver01.sdcc.bnl.gov:25443/server/panda'
@@ -104,7 +104,12 @@ task_ids = [6304]
 task_ids = [37539, 37540, 27471, 28411, 28414, 28618, 28989, 30058, 32568, 32590, 32591, 32592, 32593, 33940, 34435, 35278, 35291, 35591, 35592, 36353, 38401, 38607, 39918, 39919, 39931, 39932, 40286, 28988, 37539, 37540, 37545]
 task_ids = [42831, 42834, 42867]
 task_ids = [42954, 42956, 42933, 42934, 42935, 42937, 42939, 42941, 42942, 42943, 42944, 42945, 42946, 42947, 42783, 42785, 42786, 42787, 42788, 42789, 42790, 42791, 42792, 42793]
-task_ids = [43920]
+task_ids = [51086]
+task_ids = [50090, 49086, 46992, 46525, 46523, 46521, 46511, 46479, 46477, 46475, 46445, 46442, 46438, 46439, 45992, 45988, 44568, 44195, 44183, 44186, 44179, 44069, 44029, 43914, 43913, 43912]
+task_ids = [8776, 8745, 8716, 8710, 8705, 8353]
+task_ids = [44182]
+task_ids = [i for i in range(58496, 58538)]
+task_ids = [10973]
 for task_id in task_ids:
     print("Killing %s" % task_id)
     ret = Client.killTask(task_id, verbose=True)
@@ -116,7 +121,15 @@ for task_id in task_ids:
     ret = Client.finishTask(task_id, soft=True, verbose=True)
     print(ret)
 
-# sys.exit(0)
+newOpts = {}
+taskIDs = [58496]
+for taskID in taskIDs:
+    status, out = Client.retryTask(taskID, verbose=True, properErrorCode=True, newParams=newOpts)
+    print(f"retry task {taskID}")
+    print(status)
+    print(out)
+
+sys.exit(0)
 
 jediTaskID = 166303
 ret = Client.getJediTaskDetails({'jediTaskID': jediTaskID}, True, True, verbose=False)
@@ -291,6 +304,13 @@ for task_id in task_ids:
     print("Killing %s" % task_id)
     Client.killTask(task_id)
 
+taskIDs = [58496]
+for taskID in taskIDs:
+    status, out = Client.retryTask(taskID, verbose=True, properErrorCode=True, newParams=newOpts)
+    print(f"retry task {taskID}")
+    print(status)
+    print(out)
+
 """
 jobids = []
 Client.getJobStatus(ids=jobids, verbose=False)
@@ -323,6 +343,7 @@ newOpts = {}
 # excludedSite = newOpts.get('excludedSite', None)
 # for JEDI
 taskIDs = [5050]
+taskIDs = [58496]
 for taskID in taskIDs:
     status, out = Client.retryTask(taskID, verbose=True, properErrorCode=True, newParams=newOpts)
     print(status)

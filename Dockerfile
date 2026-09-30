@@ -104,11 +104,11 @@ RUN source /etc/profile.d/conda.sh; conda activate /opt/idds
 
 # install required packages
 RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade pip
-RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade setuptools
+RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade setuptools wheel build twine
 
-RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade requests SQLAlchemy urllib3 retrying mod_wsgi flask futures stomp.py cx-Oracle oracledb unittest2 pep8 flake8 pytest nose sphinx recommonmark sphinx-rtd-theme nevergrad
-RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade psycopg2-binary nats-py asyncio
-RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade rucio-clients-atlas rucio-clients panda-client-light==1.5.92
+RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade requests SQLAlchemy urllib3 retrying mod_wsgi flask futures stomp.py oracledb unittest2 pep8 flake8 pytest nose sphinx recommonmark sphinx-rtd-theme nevergrad
+RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade psycopg2-binary "psycopg[binary]" nats-py asyncio
+RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; python3 -m pip install --no-cache-dir --upgrade rucio-clients-atlas rucio-clients panda-client-light cachetools
 
 
 WORKDIR /tmp/src
@@ -116,9 +116,10 @@ COPY . .
 
 RUN source /etc/profile.d/conda.sh; conda activate /opt/idds; \
   if [[ -z "$TAG" ]] ; then \
-  python3 setup.py sdist bdist_wheel && main/tools/env/install_packages.sh ; \
+  python3 build_all.py wheel && main/tools/env/install_packages.sh ; \
   else \
-  python3 -m pip install --no-cache-dir --upgrade idds-common==$TAG idds-workflow==$TAG idds-server==$TAG idds-client==$TAG idds-doma==$TAG idds-atlas==$TAG idds-website==$TAG idds-monitor==$TAG ; \
+  python3 -m pip install --no-cache-dir --upgrade idds-common==$TAG idds-workflow==$TAG idds-server==$TAG idds-client==$TAG idds-doma==$TAG idds-atlas==$TAG idds-website==$TAG idds-monitor==$TAG && \
+  python3 build_all.py fix_python_version; \
   fi
 
 WORKDIR /tmp
@@ -151,12 +152,12 @@ RUN ln -fs /opt/idds/config/panda.cfg /opt/idds/etc/panda/panda.cfg
 RUN ln -fs /opt/idds/config/idds/idds.cfg /opt/idds/etc/idds/idds.cfg
 RUN ln -fs /opt/idds/config/idds/auth.cfg /opt/idds/etc/idds/auth/auth.cfg
 RUN ln -fs /opt/idds/config/idds/gacl /opt/idds/etc/idds/rest/gacl
-RUN ln -fs /opt/idds/config/idds/httpd-idds-443-py39-cc7.conf /etc/httpd/conf.d/httpd-idds-443-py39-cc7.conf
+RUN ln -fs /opt/idds/config/idds/httpd-idds-443-py311-al9.conf /etc/httpd/conf.d/httpd-idds-443-py311-al9.conf
 
 # update http config
 RUN sed -i 's/Listen\ 443/#\ Listen\ 443/g' /etc/httpd/conf.d/ssl.conf
 RUN sed -i 's/Listen\ 80/#\ Listen\ 80/g' /etc/httpd/conf/httpd.conf
-RUN sed -i "s/WSGISocketPrefix\ \/var\/log\/idds\/wsgisocks\/wsgi/WSGISocketPrefix\ \/var\/idds\/wsgisocks\/wsgi/g" /opt/idds/config_default/httpd-idds-443-py39-cc7.conf
+RUN sed -i "s/WSGISocketPrefix\ \/var\/log\/idds\/wsgisocks\/wsgi/WSGISocketPrefix\ \/var\/idds\/wsgisocks\/wsgi/g" /opt/idds/config_default/httpd-idds-443-py311-al9.conf
 
 # for idds daemons
 # RUN ln -fs /opt/idds/config/idds/supervisord_idds.ini /etc/supervisord.d/idds.ini

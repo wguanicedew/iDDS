@@ -1129,7 +1129,7 @@ class Clerk(BaseAgent):
             self.logger.error(traceback.format_exc())
         self.number_workers -= 1
 
-    def get_workflow_status(self, wf, tf_statuses, has_new_transforms, to_abort):
+    def get_workflow_status(self, wf, tf_statuses, has_new_transforms, to_abort, not_released_works=[]):
         if has_new_transforms:
             return RequestStatus.Transforming
         terminated_status = [
@@ -1153,14 +1153,24 @@ class Clerk(BaseAgent):
         all_finished = all(status in finished_status for status in tf_statuses)
         all_failed = all(status in failed_status for status in tf_statuses)
 
-        if all_finished:
-            return RequestStatus.Finished
-        elif all_failed:
-            return RequestStatus.Failed
-        elif all_terminated:
-            if to_abort:
-                return RequestStatus.Cancelled
-            return RequestStatus.SubFinished
+        if not_released_works:
+            if all_finished:
+                return RequestStatus.SubFinished
+            elif all_failed:
+                return RequestStatus.Failed
+            elif all_terminated:
+                if to_abort:
+                    return RequestStatus.Cancelled
+                return RequestStatus.SubFinished
+        else:
+            if all_finished:
+                return RequestStatus.Finished
+            elif all_failed:
+                return RequestStatus.Failed
+            elif all_terminated:
+                if to_abort:
+                    return RequestStatus.Cancelled
+                return RequestStatus.SubFinished
         return RequestStatus.Transforming
 
     def handle_update_request_real(self, req, event):
@@ -1192,6 +1202,7 @@ class Clerk(BaseAgent):
         works = wf.get_all_works()
         # print(works)
         all_released_work_status = []
+        not_released_works = []
         for work in works:
             # print(work.get_work_id())
             found_match_works = False
@@ -1222,9 +1233,11 @@ class Clerk(BaseAgent):
                         work.sync_work_data(status=tf['status'], substatus=tf['substatus'], work=transform_work, workload_id=tf['workload_id'])
                         self.logger.info(log_pre + "transform status: %s, work status: %s" % (tf['status'], work.status))
                     else:
-                        all_released_work_status.append(None)
+                        # all_released_work_status.append(None)
+                        not_released_works.append(work)
                 else:
-                    all_released_work_status.append(None)
+                    # all_released_work_status.append(None)
+                    not_released_works.append(work)
 
         wf.refresh_works(clean=True)
 
@@ -1261,7 +1274,7 @@ class Clerk(BaseAgent):
                     new_transforms.append(new_transform)
             self.logger.debug(log_pre + " Processing request(%s): new transforms: %s" % (req['request_id'], str(new_transforms)))
 
-        req_status = self.get_workflow_status(wf, all_released_work_status, has_new_transforms, to_abort)
+        req_status = self.get_workflow_status(wf, all_released_work_status, has_new_transforms, to_abort, not_released_works)
         """
         if wf.is_terminated():
             if wf.is_finished(synchronize=False):
@@ -1465,7 +1478,14 @@ class Clerk(BaseAgent):
         if req['request_type'] in [RequestType.iWorkflowLocal]:
             workflow = req['request_metadata'].get('workflow', None)
             if workflow and req['created_at'] + datetime.timedelta(seconds=workflow.max_walltime) < datetime.datetime.utcnow():
-                req_status = RequestStatus.Finished
+                # req_status = RequestStatus.Finished
+                if total_tfs == finished_tfs:
+                    req_status = RequestStatus.Finished
+                elif total_tfs == finished_tfs + subfinished_tfs + failed_tfs:
+                    if finished_tfs + subfinished_tfs > 0:
+                        req_status = RequestStatus.SubFinished
+                    else:
+                        req_status = RequestStatus.Failed
         else:
             if total_tfs == finished_tfs:
                 req_status = RequestStatus.Finished
@@ -1475,7 +1495,7 @@ class Clerk(BaseAgent):
                 else:
                     req_status = RequestStatus.Failed
 
-        log_msg = log_pre + "ireqeust %s status: %s" % (req['request_id'], req_status)
+        log_msg = log_pre + "irequest %s status: %s" % (req['request_id'], req_status)
         log_msg = log_msg + "(transforms: total %s, finished: %s, subfinished: %s, failed %s)" % (total_tfs, finished_tfs, subfinished_tfs, failed_tfs)
         self.logger.debug(log_msg)
 
@@ -1775,7 +1795,7 @@ class Clerk(BaseAgent):
                     else:
                         req_status = RequestStatus.Failed
 
-            log_msg = log_pre + "ireqeust %s status: %s" % (req['request_id'], req_status)
+            log_msg = log_pre + "irequest %s status: %s" % (req['request_id'], req_status)
             log_msg = log_msg + "(transforms: total %s, finished: %s, subfinished: %s, failed %s)" % (total_tfs, finished_tfs, subfinished_tfs, failed_tfs)
             self.logger.debug(log_msg)
 
@@ -1994,7 +2014,7 @@ class Clerk(BaseAgent):
                 elif req['request_type'] in [RequestType.iWorkflow, RequestType.iWorkflowLocal]:
                     ret = self.handle_resume_irequest(req)
                     self.update_request(ret, origin_req=req)
-                    # self.handle_command(event, cmd_status=CommandStatus.Failed, errors="Not support to reusme for iWorkflow")
+                    # self.handle_command(event, cmd_status=CommandStatus.Failed, errors="Not support to resume for iWorkflow")
                     self.handle_command(event, command=command, cmd_status=CommandStatus.Processed, errors=None)
                 else:
                     ret = self.handle_resume_request(req)

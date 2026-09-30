@@ -16,7 +16,8 @@ operations related to Catalog(Collections and Contents).
 
 from idds.common import exceptions
 from idds.common.constants import (CollectionType, CollectionStatus, CollectionLocking,
-                                   CollectionRelationType, ContentStatus, ContentRelationType)
+                                   CollectionRelationType, ContentType, ContentStatus,
+                                   ContentLocking, ContentRelationType)
 from idds.orm.base.session import read_session, transactional_session
 from idds.orm import (transforms as orm_transforms,
                       collections as orm_collections,
@@ -118,13 +119,13 @@ def add_collection(request_id, workload_id, scope, name, coll_type=CollectionTyp
 
     :returns: collection id.
     """
-    orm_collections.add_collection(request_id=request_id, workload_id=workload_id,
-                                   scope=scope, name=name, coll_type=coll_type,
-                                   transform_id=transform_id, relation_type=relation_type,
-                                   bytes=bytes, status=status, total_files=total_files,
-                                   new_files=new_files, processing_files=processing_files,
-                                   processed_files=processed_files, retries=retries, expired_at=expired_at,
-                                   coll_metadata=coll_metadata, session=session)
+    return orm_collections.add_collection(request_id=request_id, workload_id=workload_id,
+                                          scope=scope, name=name, coll_type=coll_type,
+                                          transform_id=transform_id, relation_type=relation_type,
+                                          bytes=bytes, status=status, total_files=total_files,
+                                          new_files=new_files, processing_files=processing_files,
+                                          processed_files=processed_files, retries=retries, expired_at=expired_at,
+                                          coll_metadata=coll_metadata, session=session)
 
 
 @transactional_session
@@ -172,6 +173,49 @@ def get_collection(coll_id=None, transform_id=None, relation_type=None, to_json=
     return orm_collections.get_collection(coll_id=coll_id, transform_id=transform_id,
                                           relation_type=relation_type, to_json=to_json,
                                           session=session)
+
+
+@transactional_session
+def add_content(request_id, workload_id, transform_id, coll_id, map_id, scope, name, min_id=0, max_id=0,
+                content_type=ContentType.File, status=ContentStatus.New, content_relation_type=ContentRelationType.Input,
+                bytes=0, md5=None, adler32=None, processing_id=None, storage_id=None, retries=0,
+                locking=ContentLocking.Idle, path=None, expired_at=None, content_metadata=None, session=None):
+    """
+    Add a content.
+
+    :param request_id: The request id.
+    :param workload_id: The workload id.
+    :param transform_id: transform id.
+    :param coll_id: collection id.
+    :param map_id: The id to map inputs to outputs.
+    :param scope: The scope of the request data.
+    :param name: The name of the request data.
+    :param min_id: The minimal id of the content.
+    :param max_id: The maximal id of the content.
+    :param content_type: The type of the content.
+    :param status: content status.
+    :param bytes: The size of the content.
+    :param md5: md5 checksum.
+    :param alder32: adler32 checksum.
+    :param processing_id: The processing id.
+    :param storage_id: The storage id.
+    :param retries: The number of retries.
+    :param path: The content path.
+    :param expired_at: The datetime when it expires.
+    :param content_metadata: The metadata as json.
+
+    :raises DuplicatedObject: If a collection with the same name exists.
+    :raises DatabaseException: If there is a database error.
+
+    :returns: content id.
+    """
+    return orm_contents.add_content(request_id=request_id, workload_id=workload_id, transform_id=transform_id,
+                                    coll_id=coll_id, map_id=map_id, scope=scope, name=name, min_id=min_id,
+                                    max_id=max_id, content_type=content_type, status=status,
+                                    content_relation_type=content_relation_type, bytes=bytes, md5=md5,
+                                    adler32=adler32, processing_id=processing_id, storage_id=storage_id,
+                                    retries=retries, locking=locking, path=path, expired_at=expired_at,
+                                    content_metadata=content_metadata, session=session)
 
 
 @transactional_session
@@ -260,6 +304,29 @@ def update_input_collection_with_contents(coll, parameters, contents, bulk_size=
     return to_addes
 
 
+@read_session
+def get_input_output_map_count(request_id, transform_id, session=None):
+    """Return the number of distinct map_ids (jobs) for the given transform."""
+    return orm_contents.get_input_output_map_count(request_id=request_id, transform_id=transform_id, session=session)
+
+
+@read_session
+def get_content_name_to_id_map(request_id, transform_id, es=False, session=None):
+    """Return a lightweight {name: [content_id, ...]} map for Input and Output contents."""
+    return orm_contents.get_content_name_to_id_map(request_id=request_id, transform_id=transform_id, es=es, session=session)
+
+
+@read_session
+def has_input_contents_without_external_id(request_id, transform_id, session=None):
+    """
+    Check whether any Input content for the given transform is missing an external_content_id.
+
+    Returns True if all Input contents have external_content_id set, False otherwise.
+    request_id is included because the database uses it for virtual table partitioning.
+    """
+    return orm_contents.has_input_contents_without_external_id(request_id=request_id, transform_id=transform_id, session=session)
+
+
 @transactional_session
 def update_contents(parameters, request_id=None, transform_id=None, use_bulk_update_mappings=True, session=None):
     """
@@ -337,7 +404,7 @@ def get_contents(coll_scope=None, coll_name=None, coll_id=[], request_id=None, w
 
 
 @read_session
-def get_contents_by_request_transform(request_id=None, workload_id=None, transform_id=None, status=None, map_id=None, status_updated=False, session=None):
+def get_contents_by_request_transform(request_id=None, workload_id=None, transform_id=None, status=None, map_id=None, status_updated=False, by_map=False, match_content_ext=False, session=None):
     """
     Get contents with request id, workload id and transform id.
 
@@ -350,7 +417,8 @@ def get_contents_by_request_transform(request_id=None, workload_id=None, transfo
     """
     ret = orm_contents.get_contents_by_request_transform(request_id=request_id, transform_id=transform_id,
                                                          workload_id=workload_id, status=status, map_id=map_id,
-                                                         status_updated=status_updated, session=session)
+                                                         status_updated=status_updated, by_map=by_map,
+                                                         match_content_ext=match_content_ext, session=session)
     return ret
 
 
@@ -541,6 +609,34 @@ def get_content_status_statistics_by_relation_type(transform_ids, bulk_size=500,
         return ret
     else:
         return orm_contents.get_content_status_statistics_by_relation_type(transform_ids, session=session)
+
+
+@read_session
+def get_content_status_statistics_by_coll(request_id=None, transform_id=None, with_deps=True, session=None):
+    """
+    Get content statistics grouped by (coll_id, status) with sum of bytes.
+
+    :param request_id: request id.
+    :param transform_id: transform id.
+    :param session: The database session in use.
+
+    :returns: dict {coll_id: {status: {'count': N, 'bytes': B}, 'has_unsynced': bool}}
+    """
+    return orm_contents.get_content_status_statistics_by_coll(request_id=request_id, transform_id=transform_id, with_deps=with_deps, session=session)
+
+
+@read_session
+def get_content_ext_status_statistics_by_coll(request_id=None, transform_id=None, session=None):
+    """
+    Get contents_ext statistics grouped by (coll_id, status).
+
+    :param request_id: request id.
+    :param transform_id: transform id.
+    :param session: The database session in use.
+
+    :returns: dict {coll_id: {status: count}}
+    """
+    return orm_contents.get_content_ext_status_statistics_by_coll(request_id=request_id, transform_id=transform_id, session=session)
 
 
 @transactional_session

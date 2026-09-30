@@ -32,7 +32,7 @@ setup_logging(__name__)
 
 class Parameter(object):
     def __init__(self, params):
-        assert(type(params) in [dict])
+        assert (type(params) in [dict])
         self.params = params
 
     def add(self, name, value):
@@ -448,7 +448,7 @@ class Work(Base):
         """
         Init a work/task/transformation.
 
-        :param setup: A string to setup the executable enviroment, it can be None.
+        :param setup: A string to setup the executable environment, it can be None.
         :param executable: The executable.
         :param arguments: The arguments.
         :param parameters: A dict with arguments needed to be replaced.
@@ -1374,7 +1374,7 @@ class Work(Base):
         """
         *** Function called by Marshaller agent.
         """
-        assert(isinstance(status, WorkStatus))
+        assert (isinstance(status, WorkStatus))
         self.status = status
         # if self.workflow:
         #     self.workflow.work_status_update_trigger(self, status)
@@ -1449,6 +1449,12 @@ class Work(Base):
 
     def get_ancestry_works(self):
         return []
+
+    def get_processing_job_ids(self, processing, log_prefix=''):
+        return []
+
+    def get_processing_job_name_to_ids(self, processing, job_ids, log_prefix=''):
+        return {}
 
     def has_to_release_inputs(self):
         if self.backup_to_release_inputs['0'] or self.backup_to_release_inputs['1'] or self.backup_to_release_inputs['2']:
@@ -1643,9 +1649,9 @@ class Work(Base):
         self.polling_retries = 0
 
     def add_collection_to_collections(self, coll):
-        assert(isinstance(coll, dict))
-        assert('scope' in coll)
-        assert('name' in coll)
+        assert (isinstance(coll, dict))
+        assert ('scope' in coll)
+        assert ('name' in coll)
 
         coll_metadata = copy.copy(coll)
         del coll_metadata['scope']

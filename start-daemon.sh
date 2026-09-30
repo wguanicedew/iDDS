@@ -15,6 +15,7 @@ conda activate /opt/idds;
 
 export IDDS_HOME=/opt/idds
 export ALEMBIC_CONFIG=/opt/idds/config/idds/alembic.ini
+export IDDS_CONFIG=/opt/idds/etc/idds/idds.cfg
 
 if [ -f /etc/grid-security/hostkey.pem ]; then
     echo "host certificate is already created."
@@ -24,14 +25,6 @@ elif [ -f /opt/idds/certs/hostkey.pem ]; then
     ln -fs /opt/idds/certs/hostkey.pem /etc/grid-security/hostkey.pem
     ln -fs /opt/idds/certs/hostcert.pem /etc/grid-security/hostcert.pem
     chmod 600 /etc/grid-security/hostkey.pem
-fi
-# setup intermediate certificate
-if [ ! -f /etc/grid-security/chain.pem ]; then
-  if [ -f /opt/idds/certs/chain.pem ]; then
-    ln -fs /opt/idds/certs/chain.pem /etc/grid-security/chain.pem
-  elif [ -f /etc/grid-security/hostcert.pem ]; then
-    ln -fs /etc/grid-security/hostcert.pem /etc/grid-security/chain.pem
-  fi
 fi
 
 if [ -f /opt/idds/config/idds/idds.cfg ]; then
@@ -56,6 +49,8 @@ else
     python3 /opt/idds/tools/env/merge_configmap.py \
         -s /opt/idds/configmap/idds_configmap.json \
         -d /opt/idds/config/idds/alembic.ini
+    PY_VER=$(python3 -c "import sys; print('python{}.{}'.format(sys.version_info.major, sys.version_info.minor))")
+    sed -i "s|{python_version}|${PY_VER}|g" /opt/idds/config/idds/alembic.ini
 fi
 
 if [ -f /opt/idds/config/idds/auth.cfg ]; then
@@ -118,11 +113,23 @@ fi
 echo "generate oidc token from environment PANDA_AUTH_ID_TOKEN if it exists."
 python3 /opt/idds/tools/env/merge_configmap.py --create_oidc_token
 
-if [ -f /opt/idds/config/idds/httpd-idds-443-py39-cc7.conf ]; then
+if [ -f /opt/idds/config/idds/httpd-idds-443-py311-al9.conf ]; then
     echo "httpd conf already mounted."
 else
     echo "httpd conf not found. will use the default one."
-    cp /opt/idds/config_default/httpd-idds-443-py39-cc7.conf /opt/idds/config/idds/httpd-idds-443-py39-cc7.conf
+    if [ -f /opt/idds/config_default/httpd-idds-443-py311-al9.conf ]; then
+        cp /opt/idds/config_default/httpd-idds-443-py311-al9.conf /opt/idds/config/idds/httpd-idds-443-py311-al9.conf
+    else
+        echo "httpd default conf not found. will generate from template and use the default one."
+        # Generate *.install_template files (Apache conf + idds.wsgi) with paths
+        # resolved from the running /opt/idds Python env, not from the build env.
+        python3 /opt/idds/tools/env/setup_idds_path.py
+        # Use the freshly generated install_template as the default httpd conf.
+        if [ -f /opt/idds/etc/idds/rest/httpd-idds-443-py39-cc7.conf.install_template ]; then
+            cp /opt/idds/etc/idds/rest/httpd-idds-443-py39-cc7.conf.install_template \
+               /opt/idds/config/idds/httpd-idds-443-py39-cc7.conf
+        fi
+    fi
 fi
 
 if [ -f /opt/idds/config/idds/supervisord_idds.ini ]; then
@@ -170,6 +177,18 @@ else
     chmod 600 /etc/grid-security/hostkey.pem
 fi
 
+# setup intermediate certificate - this must run after the host certificate is in
+# place (either mounted or self-signed above), otherwise the self-signed case never
+# has a hostcert.pem to fall back to and chain.pem is left missing, which makes
+# httpd refuse to start (SSLCertificateChainFile: file does not exist or is empty).
+if [ ! -f /etc/grid-security/chain.pem ]; then
+  if [ -f /opt/idds/certs/chain.pem ]; then
+    ln -fs /opt/idds/certs/chain.pem /etc/grid-security/chain.pem
+  elif [ -f /etc/grid-security/hostcert.pem ]; then
+    ln -fs /etc/grid-security/hostcert.pem /etc/grid-security/chain.pem
+  fi
+fi
+
 cp /opt/idds/config_default/httpd_daemon.sh /opt/idds/config/idds/httpd_daemon.sh
 chmod a+rx /opt/idds/config/idds/httpd_daemon.sh
 
@@ -185,8 +204,8 @@ if [ ! -z "$IDDS_PRINT_CFG" ]; then
     echo "=================== /opt/idds/etc/idds/rest/gacl ============================"
     cat /opt/idds/etc/idds/rest/gacl
     echo ""
-    echo "=================== /etc/httpd/conf.d/httpd-idds-443-py39-cc7.conf ============================"
-    cat /etc/httpd/conf.d/httpd-idds-443-py39-cc7.conf
+    echo "=================== /etc/httpd/conf.d/httpd-idds-443-py311-al9.conf ============================"
+    cat /etc/httpd/conf.d/httpd-idds-443-py311-al9.conf
     echo ""
     echo "=================== /opt/idds/config/idds/supervisord_idds.ini ============================"
     cat /opt/idds/config/idds/supervisord_idds.ini

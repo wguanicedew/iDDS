@@ -192,6 +192,9 @@ def get_additional_request_data_storage(data, workflow, logger):
         else:
             additional_storage = '/tmp'
 
+        if not workflow or not hasattr(workflow, "is_with_steps"):
+            return False, additional_storage
+
         if workflow and (workflow.is_with_steps() or workflow.is_workflow_step):
             return False, additional_storage
 
@@ -211,6 +214,7 @@ def convert_data_to_use_additional_storage(data, additional_data_storage, with_a
 
     if ('request_metadata' in data and isinstance(data['request_metadata'], dict) and data['request_metadata'].get('workflow')):
         workflow = data['request_metadata']['workflow']
+        logger.debug(f"convert_data_to_use_additional_storage get workflow: {workflow}")
         if with_add_storage:
             internal_id = workflow.get_internal_id()
             storage = os.path.join(additional_data_storage, internal_id)
@@ -222,7 +226,7 @@ def convert_data_to_use_additional_storage(data, additional_data_storage, with_a
             workflow.convert_data_to_additional_data_storage(storage)
             data['request_metadata']['workflow'] = workflow
             logger.info(f"Converted workflow {workflow.name} to use storage {storage}")
-        elif workflow.is_with_steps():
+        elif hasattr(workflow, "is_with_steps") and workflow.is_with_steps():
             wf_storage = workflow.get_additional_data_storage()
             logger.info(f"Workflow {workflow.name} has steps with additional storage {wf_storage}")
             if wf_storage == "IDDS_WORKFLOW_ADDITIONAL_STORAGE":

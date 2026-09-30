@@ -16,14 +16,14 @@ Utils to create the database or destroy the database
 import io
 import os
 import traceback
-from typing import Union
+# from typing import Union
 
 from alembic.config import Config
 from alembic import command
 
 import sqlalchemy
 # from sqlalchemy.engine import reflection
-from sqlalchemy.engine import Inspector
+# from sqlalchemy.engine import Inspector
 from sqlalchemy import inspect
 from sqlalchemy.dialects.postgresql.base import PGInspector
 from sqlalchemy.schema import CreateSchema, MetaData, Table, DropTable, ForeignKeyConstraint, DropConstraint
@@ -93,7 +93,7 @@ def destroy_everything(echo=True):
         # transactional DDL, i.e. Postgresql, MS SQL Server
         with engine.begin() as conn:
 
-            inspector = inspect(conn)  # type: Union[Inspector, PGInspector]
+            inspector = inspect(conn)
 
             for tname, fkcs in reversed(
                     inspector.get_sorted_table_and_fkc_names(schema='*')):
